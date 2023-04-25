@@ -7,7 +7,7 @@ import torch
 def get_model():
     tokenizer = PegasusTokenizer.from_pretrained('nsi319/legal-pegasus')
     model = PegasusForConditionalGeneration.from_pretrained(
-        "arjav/TOS-Pegasus", use_cuda = False)
+        "arjav/TOS-Pegasus")
     model.args.use_multiprocessing = False
 
     return tokenizer, model
