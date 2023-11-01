@@ -6,3 +6,5 @@ The Abstractive methods used are: BART transformer and PEGASUS transformer fine 
 
 Model space on hugging face = https://huggingface.co/spaces/Arjav/TOS-Summarization
 
+
+TOS Summarization
