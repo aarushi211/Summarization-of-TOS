@@ -8,11 +8,9 @@ Hence, we build a summarizer that can summarize the TOS into bullet points for b
 - [Models Used](#extractive-models) 
     - [Extractive Model](#extractive-models)
     - [Abstractive Model](#abstractive-models)
-- [Comparative Analysis](#comparitive-analysis)
+- [Comparative Analysis](#comparative-analysis)
 - [Demo](#demo)
 - [How to Run Locally](#how-to-run-locally)
-- [Future Work](#future-work)
-- [Credits](#credits)
 
 ## Extractive Models
 ### **Text Rank**<br>
