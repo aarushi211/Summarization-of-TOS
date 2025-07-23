@@ -1,7 +1,18 @@
 # TOS-Summarization
-Terms of Service that come with any product or service is not only length and time consuming to read but are also difficult to understand. Due to which most people often skip and directly agree to the terms. However, given the current digital world with cyber-crimes being prevelant in every part of the world, it is highly important to be aware of ones right and how your data is being processed by the service provider. 
+Terms of Service that come with any product or service is not only lengthy and time-consuming to read but are also difficult to understand. As a result most people often skip and directly agree to the terms. However, given the current digital world with cyber-crimes being prevalent in every part of the world, it is highly important to be aware of ones right and how your data is being processed by the service provider. 
 
-Hence, we build a summarizer that can summarize the TOS into bullet points for better readiability. For this purpose we experimented with various Extractive and Abstractive models.
+Hence, we build a summarizer that can summarize the TOS into bullet points for better readability. For this purpose we experimented with various Extractive and Abstractive models.
+
+## Table of Contents
+- [Overview](#TOS-Summarization)
+- [Models Used](#extractive-models) 
+    - [Extractive Model](#extractive-models)
+    - [Abstractive Model](#abstractive-models)
+- [Comparative Analysis](#comparitive-analysis)
+- [Demo](#demo)
+- [How to Run Locally](#how-to-run-locally)
+- [Future Work](#future-work)
+- [Credits](#credits)
 
 ## Extractive Models
 ### **Text Rank**<br>
@@ -18,7 +29,7 @@ BART (Bidirectional and Auto-Regressive Transformers) developed by Facebook AI (
 * BERT (Bidirectional Encoder): For understanding context from both left and right.
 * GPT (Autoregressive Decoder): For generating fluent text.
 
-The architecture contains fully bi-directional encoder and autorgressive decoder. 
+The architecture contains fully bi-directional encoder and autoregressive decoder. 
 The model is trained to reconstruct the original text from a corrupted version by applying various noise transformations such as -
 * Token Masking
 * Token Deletion
@@ -51,7 +62,7 @@ The sparse attention transformer helps -
 
 It uses combination of 3 spare attention mechanisms -
 * Global: It attends to fixed set of tokens which focuses on important summary tokens
-* Random: Attends to random positions to add conectivity
+* Random: Attends to random positions to add connectivity
 * Local: Attends to fixed size window to capture neighbouring context
 
 Variants used -
@@ -75,7 +86,7 @@ This structure enables dense attention in important places and sparse attention 
 Variant used -
 * allenai/led-base-16384 (https://huggingface.co/allenai/led-base-16384)
 
-## Comparitive Analysis
+## Comparative Analysis
 We used ROUGE (Recall Oriented Understudy of Gisting Evaluation) as evaluation metric.
 
 |**Model** | **ROUGE-1** | **ROUGE-2**| **ROUGE-L**|
@@ -100,6 +111,26 @@ Overall, Longformer outperforms all other models, with BART Large CNN coming clo
 
 **Overall, Longformer performs the best**
 
-# Demo
+## Demo
 A demo using Longformer is available at -
 https://huggingface.co/spaces/aarushi-211/TOS-Summarizer
+
+![Demo Screenshot](demo.png)
+
+## How to Run Locally
+1. Clone the repo:
+```bash
+git clone https://github.com/aarushi211/TOS-Summarization.git
+cd TOS-Summarization
+```
+2. Install dependencies
+```
+pip install -r requirements.txt
+```
+3. Run app locally
+app.py uses pegasus
+app2.py uses longformer
+```
+cd '.\Front End\'
+python app2.py
+```
