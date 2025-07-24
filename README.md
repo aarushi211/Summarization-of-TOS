@@ -85,7 +85,7 @@ Variant used -
 * allenai/led-base-16384 (https://huggingface.co/allenai/led-base-16384)
 
 ## Comparative Analysis
-We used ROUGE (Recall Oriented Understudy of Gisting Evaluation) as evaluation metric.
+### **ROUGE**
 
 |**Model** | **ROUGE-1** | **ROUGE-2**| **ROUGE-L**|
 |----------|-------------|------------|------------|
@@ -99,7 +99,7 @@ We used ROUGE (Recall Oriented Understudy of Gisting Evaluation) as evaluation m
 
 Overall, Longformer outperforms all other models, with BART Large CNN coming close to it.
 
-## Average Inference Time
+### **Average Inference Time**
 |**Model** | **Inference Time**|
 |----------|-------------|
 |BigBird Pegasus | 10.39 ± 0.57 s|
