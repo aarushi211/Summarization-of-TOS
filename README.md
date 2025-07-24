@@ -91,23 +91,22 @@ We used ROUGE (Recall Oriented Understudy of Gisting Evaluation) as evaluation m
 |----------|-------------|------------|------------|
 |TextRank  | 23.6 | 7.02 | 20.2 |
 |Bart Base | 21.5 | 5.99 | 18.79 |
-|BART Large CNN | **28.2** | **13.72** | **26.11** |
+|BART Large CNN | 28.2 | **13.72** | 26.11 |
 |Pegasus Billsum | 25.9 | 8.85 | 22.6 |
 |Pegasus Legal | 25.2 | 7.85 | 22.87 |
 |BigBird Pegasus | 24.56 | 6.88 | 21.33 |
-|Longformer | **28.97** | **13.49** | **27.05** |
+|Longformer | **28.97** | 13.49 | **27.05** |
 
 Overall, Longformer outperforms all other models, with BART Large CNN coming close to it.
 
 ## Average Inference Time
 |**Model** | **Inference Time**|
 |----------|-------------|
-|BigBird Pegasus | 9.86 ± 0.75 s|
-|Pegasus | 7.12 ± 0.32s |
-|BART Large CNN | |
-|Longformer | **3.29 ± 0.06 s**|
+|BigBird Pegasus | 10.39 ± 0.57 s|
+|Pegasus Legal | 6.89 ± 1.13s |
+|Longformer | **3.11 ± 0.04 s**|
 
-**Overall, Longformer performs the best**
+**Overall, Longformer performs considerably better in terms of both ROUGE score and inference time.**
 
 ## Demo
 A demo using Longformer is available at -
