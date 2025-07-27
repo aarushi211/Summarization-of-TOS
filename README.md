@@ -11,6 +11,7 @@ Hence, we build a summarizer that can summarize the TOS into bullet points for b
 - [Comparative Analysis](#comparative-analysis)
 - [Demo](#demo)
 - [How to Run Locally](#how-to-run-locally)
+- [References](#references)
 
 ## Extractive Models
 ### **Text Rank**<br>
@@ -36,8 +37,8 @@ The model is trained to reconstruct the original text from a corrupted version b
 * Document Rotation
 
 BART variants used -
-* facebook/bart-base (https://huggingface.co/facebook/bart-base)
-* facebook/bart-large-cnn (https://huggingface.co/facebook/bart-large-cnn)
+* facebook/bart-base: [Hugging Face](https://huggingface.co/facebook/bart-base)
+* allenai/led-base-16384: [Hugging Face](https://huggingface.co/allenai/led-base-16384)
 
 ### **2. Pegasus**<br>
 PEGASUS (Pre-training with Extracted Gap-sentences for Abstractive Summarization) developed by Google Research in 2020 is specifically designed for abstractive text summarization tasks.
@@ -47,8 +48,8 @@ It uses the concept of Gap Sentence Generation (GSG). In this important sentence
 This simulates the summarization task more closely than traditional masked language modeling (like BERT).
 
 For our specific case we used the following variants -
-* google/pegasus-billsum (https://huggingface.co/google/pegasus-billsum)
-* nsi319/legal-pegasus (https://huggingface.co/nsi319/legal-pegasus)
+* google/pegasus-billsum: [Hugging Face](https://huggingface.co/google/pegasus-billsum)
+* nsi319/legal-pegasus: [Hugging Face](https://huggingface.co/nsi319/legal-pegasus)
 
 ### **3. BigBird**
 BigBird (Big Transformer with Sparse Attention) developed by Google Research in 2020 scales to long sequences by replacing standard full attention with sparse attention, while retaining high performance.
@@ -64,10 +65,10 @@ It uses combination of 3 spare attention mechanisms -
 * Local: Attends to fixed size window to capture neighbouring context
 
 Variants used -
-* google/bigbird-pegasus-large-arxiv (https://huggingface.co/google/bigbird-pegasus-large-arxiv)
+* google/bigbird-pegasus-large-arxiv: [Hugging Face](https://huggingface.co/google/bigbird-pegasus-large-arxiv)
 
 ### **4. Longformer**
-Lonformer introduced by Allen Institute for AI also uses sparse attention mechanism to handle long documents.
+Longformer introduced by Allen Institute for AI also uses sparse attention mechanism to handle long documents.
 
 The sparse attention mechanism it uses is called sliding window attention. It helps -
 * Enables processing of sequences up to 4096–8192+ tokens.
@@ -82,7 +83,7 @@ It uses combination of sparse and full attention -
 This structure enables dense attention in important places and sparse attention elsewhere, balancing efficiency and performance.
 
 Variant used -
-* allenai/led-base-16384 (https://huggingface.co/allenai/led-base-16384)
+* allenai/led-base-16384: [Hugging Face](https://huggingface.co/allenai/led-base-16384)
 
 ## Comparative Analysis
 ### **ROUGE**
@@ -131,3 +132,8 @@ app2.py uses longformer
 cd '.\Front End\'
 python app2.py
 ```
+
+## References
+- Lewis et al. (2019). *BART: Denoising Sequence-to-Sequence Pre-training*  
+- Zhang et al. (2019). *PEGASUS: Pre-training with Extracted Gap-sentences*  
+- Beltagy et al. (2020). *Longformer: The Long-Document Transformer*
