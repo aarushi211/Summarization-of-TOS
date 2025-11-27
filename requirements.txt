@@ -1,0 +1,10 @@
+vllm 
+pyarrow
+time
+glob
+tqdm
+pandas
+os
+google-generativeai
+python-dotenv
+ollama
