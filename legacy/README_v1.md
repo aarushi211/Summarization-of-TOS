@@ -137,3 +137,24 @@ python app2.py
 - Lewis et al. (2019). *BART: Denoising Sequence-to-Sequence Pre-training*  
 - Zhang et al. (2019). *PEGASUS: Pre-training with Extracted Gap-sentences*  
 - Beltagy et al. (2020). *Longformer: The Long-Document Transformer*
+
+
+### Updates
+Original dataset which the model is trained on is full of noisy data from human summarizer. Quality is pretty low. So overall summarization done not so good.
+Added a simple RAG model on top of it.
+Now the user gives a pdf doc they want to summarize. 
+User gives the query (for general summarization embed the query)
+The retriever retrieved the top 5 chunks from the pdf
+Send these chunks to the fine-tuned longformer model
+Returns a summary
+Then BERT uses all the context to generate a coherent summary
+**Problem**: Fine-tuned model not great. The final summary generated is of really poor quality.
+
+**Solution**
+Fine-tuned model on BillSum dataset to have it learn about legal language.
+Generate synthetic data using Gemini API for TOSDR dataset found on kaggle.
+Use this dataset to further fine-tune the model on TOS.
+Use this model along with RAG to generate final summary.
+
+
+Serverless GPU Pipeline using Kaggle as your compute backend
