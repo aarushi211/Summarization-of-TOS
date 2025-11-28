@@ -8,3 +8,10 @@ os
 google-generativeai
 python-dotenv
 ollama
+bitsandbytes
+transformers
+accelerate
+peft
+trl
+scikit-learn 
+datasets
