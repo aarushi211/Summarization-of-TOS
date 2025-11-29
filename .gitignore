@@ -28,6 +28,7 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+.python-version
 
 # --- Virtual Environments ---
 venv/
@@ -41,13 +42,9 @@ profile_default/
 ipython_config.py
 
 # --- Project Specific Ignored Folders ---
-# Deployment folder you mentioned
 TOS-Summarizer-Spaces/
-# Legacy archive (Optional: Uncomment if you want to keep legacy local but not on git)
-# legacy_v1/
 
 # --- Large Model Artifacts & Data ---
-# Crucial to prevent uploading 15GB files by accident
 *.gguf
 *.bin
 *.pt
@@ -55,9 +52,9 @@ TOS-Summarizer-Spaces/
 *.safetensors
 *.h5
 data/model_artifacts/
-data/raw/
-data/processed/
 
 # --- IDE Settings (Optional but good practice) ---
 .vscode/
 .idea/
+
+temp_tos.pdf
