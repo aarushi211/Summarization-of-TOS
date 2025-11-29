@@ -51,7 +51,7 @@ TOS-Summarizer-Spaces/
 *.pth
 *.safetensors
 *.h5
-data/model_artifacts/
+data/model_artifact/
 
 # --- IDE Settings (Optional but good practice) ---
 .vscode/
