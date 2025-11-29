@@ -1,6 +1,6 @@
 import os
 from langchain_community.document_loaders import PyPDFLoader
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 from llama_cpp import Llama
@@ -9,7 +9,7 @@ class TOSAssistant:
     def __init__(self, model_path):
         self.llm = Llama(
             model_path, 
-            x_ctx = 8192,
+            n_ctx = 8192,
             n_gpu_layers=-1,
             verbose=False
         )
@@ -20,7 +20,7 @@ class TOSAssistant:
         self.doc_type = "Terms of Service" # Default
         self.service_name = "Unknown Service" #Default
 
-    def ingest_doc(self, pdf_path):
+    def ingest_document(self, pdf_path):
         print(f'Ingesting {pdf_path}')
         loader = PyPDFLoader(pdf_path)
         documents = loader.load()
