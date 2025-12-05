@@ -42,35 +42,27 @@ graph TD
 
 High-quality, abstractive summaries for legal documents are scarce. To solve this, I engineered a synthetic data pipeline to generate a custom dataset.
 
-**Source Data:** Used the raw text files from TOSDR (Terms of Service; Didn't Read) extracted by [Sonu Gupta](https://github.com/sonu-gupta/tosdr-terms-of-service-corpus).
-
-**Teacher Model:** Llama 3.1 8B Instruct.
-
-**Inference Engine:** Utilized vLLM (PagedAttention) on a T4 GPU to maximize throughput, generating 9,000 summaries.
-
-**Outcome:** Created a high-quality, task-specific dataset mapping raw legal text to concise executive summaries.
-
-**Alternative Teacher Models:** Gemini 2.5 Flash, llama3.1:8b
+- **Source Data:** Used the raw text files from TOSDR (Terms of Service; Didn't Read) extracted by [Sonu Gupta](https://github.com/sonu-gupta/tosdr-terms-of-service-corpus).
+- **Teacher Model:** Llama 3.1 8B Instruct.
+- **Inference Engine:** Utilized vLLM (PagedAttention) on a T4 GPU to maximize throughput, generating 9,000 summaries.
+- **Outcome:** Created a high-quality, task-specific dataset mapping raw legal text to concise executive summaries.
+- **Alternative Teacher Models:** Gemini 2.5 Flash, llama3.1:8b
 
 ### Phase 2: Knowledge Distillation
 
 Deploying a 7B+ model is expensive. I distilled the knowledge from the Teacher (Llama 3.1) into a Student model (Qwen 2.5 1.5B) to enable edge-friendly deployment.
 
-**Technique:** Supervised Fine-Tuning (SFT) with QLoRA (4-bit quantization).
-
-**Optimization:** Used gradient accumulation and checkpointing to fit training within Google Colab's free tier limits.
-
-**Result:** A lightweight 3GB model that mimics the reasoning of Llama 3.1 but runs 4x faster.
+- **Technique:** Supervised Fine-Tuning (SFT) with QLoRA (4-bit quantization).
+- **Optimization:** Used gradient accumulation and checkpointing to fit training within Google Colab's free tier limits.
+- **Result:** A lightweight 3GB model that mimics the reasoning of Llama 3.1 but runs 4x faster.
 
 ### Phase 3: Quantization & Cloud Deployment
 
 To make the system production-ready and cost-efficient:
 
-**Quantization:** Converted the fine-tuned model to GGUF (4-bit) format using llama.cpp. This reduced the model size to ~1 GB, allowing it to run purely on CPU.
-
-**Containerization:** Built a multi-stage Docker container optimized for Google Cloud Run.
-
-**Infrastructure:** Configured custom memory limits (4GiB) and concurrency settings to serve the model serverlessly.
+- **Quantization:** Converted the fine-tuned model to GGUF (4-bit) format using llama.cpp. This reduced the model size to ~1 GB, allowing it to run purely on CPU.
+- **Containerization:** Built a multi-stage Docker container optimized for Google Cloud Run.
+- **Infrastructure:** Configured custom memory limits (4GiB) and concurrency settings to serve the model serverlessly.
 
 ## 🛠️ Tech Stack
 
