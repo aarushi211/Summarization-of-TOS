@@ -9,10 +9,11 @@ from src.RAG.rag_pipeline import TOSAssistant
 st.set_page_config(page_title="TOS Summarizer", layout="wide")
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-MODEL_PATH = SCRIPT_DIR.parent / 'data' / 'model_artifact' / 'mistral-legal-q8.gguf'
+PROJECT_ROOT = SCRIPT_DIR.parent.parent
+MODEL_PATH = PROJECT_ROOT / "models" / "qwen-merged-q4_k_m.gguf"
 
 st.sidebar.title("Settings")
-st.sidebar.info("Legal Document Summarizer powered by Mistral-7B (Fine-Tuned)")
+st.sidebar.info("Legal Document Summarizer powered by Qwen 2.5 (Fine-Tuned)")
 
 @st.cache_resource
 def load_rag_engine():
