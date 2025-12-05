@@ -1,0 +1,21 @@
+# .gcloudignore
+
+# Ignore everything by default
+*
+
+# Explicitly ALLOW the files we need (Whitelist approach)
+!app/
+!src/
+!Models/
+!requirements.txt
+!README.md
+!Dockerfile
+
+# Ignore the heavy/useless stuff explicitly just in case
+.git/
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.ipynb
+.DS_Store
