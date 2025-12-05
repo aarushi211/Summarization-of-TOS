@@ -8,7 +8,6 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y \
     build-essential \
     curl \
-    software-properties-common \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies
@@ -19,7 +18,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy the application code
 # We copy the entire 'app' and 'src' folders so imports work
 COPY app/ app/
-COPY src/rag_pipeline/ src/rag_pipeline/
+COPY src/RAG/ src/RAG/
 
 # Create the directory for the model
 RUN mkdir -p data/model_artifacts/
