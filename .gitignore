@@ -52,9 +52,13 @@ TOS-Summarizer-Spaces/
 *.safetensors
 *.h5
 data/model_artifact/
+src/Job Submission/
 
 # --- IDE Settings (Optional but good practice) ---
 .vscode/
 .idea/
 
 temp_tos.pdf
+command.txt
+local_embed.py
+models/
