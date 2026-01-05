@@ -4,16 +4,11 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 from pathlib import Path
 
 BASE_MODEL_ID = 'mistralai/Mistral-7B-Instruct-v0.3'
-SCRIPT_DIR = Path(__file__).resolve().parent
-ADAPTER_PATH = SCRIPT_DIR.parent.parent / 'data' / 'model_artifact' / 'final_model'
-MERGED_PATH = SCRIPT_DIR.parent.parent / 'data' / 'model_artifact' / 'Mistral_merged'
-
-bnb_config = BitsAndBytesConfig(
-    load_in_4bit=True,
-    bnb_4bit_quant_type="nf4",
-    bnb_4bit_compute_dtype=torch.bfloat16,
-    bnb_4bit_use_double_quant=True,
-)
+# SCRIPT_DIR = Path(__file__).resolve().parent
+# ADAPTER_PATH = SCRIPT_DIR.parent.parent / 'data' / 'model_artifact' / 'final_model'
+# MERGED_PATH = SCRIPT_DIR.parent.parent / 'data' / 'model_artifact' / 'Mistral_merged'
+ADAPTER_PATH = '/project2/neiswang_1520/gamelen/TOS/model_artifact_v2/legal_mistral_adapter'
+MERGED_PATH = '/project2/neiswang_1520/gamelen/TOS/model_artifact_v2/legal_mistral_merged'
 
 # Loading base model in fp16
 base_model = AutoModelForCausalLM.from_pretrained(
