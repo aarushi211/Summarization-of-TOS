@@ -10,7 +10,7 @@ st.set_page_config(page_title="TOS Summarizer", layout="wide")
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent.parent
-MODEL_PATH = PROJECT_ROOT / "models" / "qwen-merged-q4_k_m.gguf"
+MODEL_PATH = PROJECT_ROOT / "models" / "legal_qwen.Q4_K_M.gguf"
 
 st.sidebar.title("Settings")
 st.sidebar.info("Legal Document Summarizer powered by Qwen 2.5 (Fine-Tuned)")

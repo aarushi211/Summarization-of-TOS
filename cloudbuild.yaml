@@ -1,5 +1,5 @@
 steps:
   - name: 'gcr.io/cloud-builders/docker'
-    args: ['build', '-t', 'us-central1-docker.pkg.dev/$PROJECT_ID/tos-repo/tos-streamlit:v1', '-f', 'app/Dockerfile', '.']
+    args: ['build', '-t', 'us-central1-docker.pkg.dev/$PROJECT_ID/tos-repo/tos-streamlit:v2', '-f', 'app/Dockerfile', '.']
 images:
-  - 'us-central1-docker.pkg.dev/$PROJECT_ID/tos-repo/tos-streamlit:v1'
+  - 'us-central1-docker.pkg.dev/$PROJECT_ID/tos-repo/tos-streamlit:v2'

@@ -22,7 +22,7 @@ COPY src/RAG/ src/RAG/
 
 RUN mkdir -p /app/models/embeddings
 
-COPY models/qwen-merged-q4_k_m.gguf /models/qwen-merged-q4_k_m.gguf
+COPY models/legal_qwen.Q4_K_M.gguf /models/legal_qwen.Q4_K_M.gguf
 COPY models/embeddings/ /app/models/embeddings/
 
 
