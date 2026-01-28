@@ -199,3 +199,8 @@ pip install -r requirements.txt
 ```
 streamlit run app/app.py
 ```
+
+## ⚙️ Deployment & MLOps
+Deploying LLMs to serverless infrastructure presents unique challenges regarding memory, build times, and cold starts. 
+
+👉 **[Read the full Deployment Engineering Guide](DEPLOYMENT.md)** to see how I solved Docker build timeouts and optimized inference for CPU-only environments.
