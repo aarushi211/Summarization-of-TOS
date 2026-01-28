@@ -51,16 +51,14 @@ class TOSAssistant:
 
         truncated_text = self.full_text[:30000] 
 
-        # 1. The Fine-Tuning Prompt (Recreating the magic)
         system_prompt = "You are a legal expert. Summarize the following Terms of Service. Focus on user rights and data privacy."
         user_prompt = f"Summarize the following {self.doc_type} for the service \"{self.service_name}\":\n\nDocument Text:\n{truncated_text}"
 
         formatted_prompt = self.format_llama3_prompt(system_prompt, user_prompt)
 
-        # 2. Generate
         output = self.llm(
             formatted_prompt,
-            max_tokens=500, # The abstractive summary length
+            max_tokens=500, 
             temperature=0.1,
             stop=["<|eot_id|>"],
             echo=False
@@ -71,17 +69,14 @@ class TOSAssistant:
         if not self.vector_store:
             return "Please upload a document first."
 
-        # 1. Retrieve Top 3 Relevant Chunks
         docs = self.vector_store.similarity_search(query, k=3)
         context = "\n\n".join([d.page_content for d in docs])
 
-        # 2. The RAG Prompt
         system_prompt = "You are a legal expert assistant. Answer the user's question based strictly on the provided context clauses."
         user_prompt = f"Question: {query}\n\nContext Clauses:\n{context}\n\nAnswer:"
 
         formatted_prompt = self.format_llama3_prompt(system_prompt, user_prompt)
 
-        # 3. Generate
         output = self.llm(
             formatted_prompt,
             max_tokens=300,

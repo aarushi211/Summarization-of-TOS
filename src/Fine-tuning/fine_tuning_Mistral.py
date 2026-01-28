@@ -6,12 +6,10 @@ from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 from trl import SFTTrainer, SFTConfig
 
-# --- CONFIGURATION ---
 MODEL_ID = 'mistralai/Mistral-7B-Instruct-v0.3'
 DATA_PATH = '/project2/neiswang_1520/gamelen/TOS/synthetic_dataset.csv'
 OUTPUT_DIR = '/project2/neiswang_1520/gamelen/TOS/model_artifact_v2' 
 
-# 1. QUANTIZATION CONFIG
 bnb_config = BitsAndBytesConfig(
     load_in_4bit=True,
     bnb_4bit_quant_type="nf4",
@@ -19,7 +17,6 @@ bnb_config = BitsAndBytesConfig(
     bnb_4bit_use_double_quant=True
 )
 
-# 2. LOAD MODEL & TOKENIZER
 print(f"Loading {MODEL_ID}...")
 model = AutoModelForCausalLM.from_pretrained(
     MODEL_ID, 
@@ -32,7 +29,6 @@ tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
 tokenizer.pad_token = tokenizer.eos_token
 tokenizer.padding_side = 'right' 
 
-# 3. LORA CONFIG
 lora_config = LoraConfig(
     r=16, 
     lora_alpha=32,
@@ -45,13 +41,11 @@ lora_config = LoraConfig(
 model = prepare_model_for_kbit_training(model)
 model = get_peft_model(model, lora_config)
 
-# 4. DATA PREPARATION (Maintaining your 8500/500 Split)
 df = pd.read_csv(DATA_PATH)
 subset_df = df.sample(n=8500, random_state=42) 
 remaining_df = df.drop(subset_df.index)
 test_df = remaining_df.sample(n=500, random_state=42)
 
-# Save the test set now so you have it for evaluation later!
 test_df.to_csv("final_unseen_test_data.csv", index=False)
 
 train_dataset = Dataset.from_pandas(subset_df)
@@ -75,7 +69,6 @@ print("Formatting dataset...")
 synthetic_dataset = train_dataset.map(format_synthetic_dataset)
 synthetic_eval_dataset = val_dataset.map(format_synthetic_dataset)
 
-# 5. TRAINING CONFIG
 sft_config = SFTConfig(
     output_dir=f'{OUTPUT_DIR}/checkpoints',
     max_seq_length=4096,
@@ -93,7 +86,6 @@ sft_config = SFTConfig(
     report_to='none'
 )
 
-# 6. TRAINER
 trainer = SFTTrainer(
     model=model,
     train_dataset=synthetic_dataset,

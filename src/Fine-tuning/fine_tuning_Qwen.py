@@ -5,7 +5,6 @@ from transformers import AutoTokenizer, AutoModelForCausalLM, TrainingArguments,
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 from trl import SFTTrainer, SFTConfig
 
-# --- CONFIGURATION ---
 MODEL_ID = "Qwen/Qwen2.5-1.5B-Instruct" 
 DATA_PATH = "/project2/neiswang_1520/gamelen/TOS/synthetic_dataset.csv"
 OUTPUT_DIR = "/project2/neiswang_1520/gamelen/TOS/model_artifact_qwen"
@@ -27,7 +26,6 @@ model = AutoModelForCausalLM.from_pretrained(
     use_cache=False 
 )
 
-# 3. LoRA (Standard)
 lora_config = LoraConfig(
     r=16, 
     lora_alpha=32,
@@ -42,7 +40,6 @@ lora_config = LoraConfig(
 model = prepare_model_for_kbit_training(model)
 model = get_peft_model(model, lora_config)
 
-# 4. Formatting Function (Qwen Chat Template)
 def format_synthetic_dataset(example):
     messages = [
         {"role": "system", "content": "You are a legal expert. Summarize the following Terms of Service. Focus on user rights and data privacy."},
@@ -72,7 +69,6 @@ print("Formatting dataset...")
 synthetic_dataset = dataset['train'].map(format_synthetic_dataset)
 synthetic_eval_dataset = dataset['test'].map(format_synthetic_dataset)
 
-# 5. Trainer
 sft_config = SFTConfig(
     output_dir=f'{OUTPUT_DIR}/checkpoints',
     max_length=4096,
