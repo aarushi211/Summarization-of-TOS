@@ -60,35 +60,7 @@ Long legal documents suffer from “Lost-in-the-Middle” failures, where critic
 
 A lightweight query router determines the appropriate path at runtime, allowing the model to operate on either truncated global context or retrieved, clause-level evidence.
 
-```
-graph TD
-    %% User Interaction
-    U[User Uploads TOS PDF / Query] --> I[PDF Ingestion & Cleaning]
-
-    %% Routing Logic
-    I --> R{Query Router}
-    R -->|Executive Summary| GS[Global Context Builder]
-    R -->|Targeted Question| QR[Query Encoder]
-
-    %% Global Summarization Path
-    subgraph A[Path A: Global Document Understanding]
-        GS --> TC[Context Truncation<br/>(Long-doc aware)]
-        TC --> LLM1[Fine-Tuned Qwen 2.5 1.5B<br/>(GGUF, CPU)]
-        LLM1 --> S[Executive Summary]
-    end
-
-    %% Retrieval-Augmented Path
-    subgraph B[Path B: Clause-Grounded QA (RAG)]
-        QR --> VDB[FAISS Vector Store]
-        VDB --> RET[Top-K Clause Retrieval]
-        RET --> LLM2[Fine-Tuned Qwen / Mistral<br/>(Grounded Inference)]
-        LLM2 --> A[Faithful Answer<br/>(Low Hallucination)]
-    end
-
-    %% Outputs
-    S --> O[User Output]
-    A --> O
-```
+![System Architecture](data/TOS%20Architecture.png)
 
 ## 🧠 Engineering Methodology
 
