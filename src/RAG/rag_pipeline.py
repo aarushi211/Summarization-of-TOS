@@ -10,8 +10,8 @@ from llama_cpp import Llama
 from sentence_transformers import CrossEncoder
 from sklearn.metrics.pairwise import cosine_similarity
 import numpy as np
-import faiss
-import json
+import re
+from difflib import SequenceMatcher
 
 class TOSAssistant:
     def __init__(self, model_path, index_dir="faiss_index"):
@@ -159,7 +159,49 @@ class TOSAssistant:
         )
         return output['choices'][0]['text']
 
-    def answer_question(self, query, top_k=3, rerank_pool=30, answer_threshold=0.2):
+    def _calculate_coverage(self, answer, context_chunks):
+        answer_lower = answer.lower()
+    
+        answer_clean = re.sub(r'\[[^\]]+\]', '', answer_lower)
+        
+        total_chars = len(answer_clean)
+        if total_chars == 0:
+            return 0.0
+        
+        covered_chars = 0
+        
+        for chunk in context_chunks:
+            chunk_lower = chunk.page_content.lower()
+            
+            # Find longest common substrings
+            matcher = SequenceMatcher(None, answer_clean, chunk_lower)
+            for match in matcher.get_matching_blocks():
+                if match.size >= 20:  # At least 20 characters
+                    covered_chars += match.size
+        
+        coverage = min(covered_chars / total_chars, 1.0)
+        return coverage
+    
+    def _extract_quotes(self, answer):
+        # Match text in quotes
+        quote_patterns = [
+            r'"([^"]{10,})"',  # Double quotes, min 10 chars
+            r"'([^']{10,})'",  # Single quotes
+        ]
+        
+        quotes = []
+        for pattern in quote_patterns:
+            quotes.extend(re.findall(pattern, answer))
+        
+        return quotes
+    
+    def _extract_citations(self, text):
+        pattern = r'\[([^\]]+::[^\]]+)\]'
+        matches = re.findall(pattern, text)
+        return set(matches)
+
+
+    def answer_question(self, query, top_k=3, rerank_pool=30, answer_threshold=0.2, require_quote=True, min_coverage=0.3):
         if not self.ensemble_retriever:
             return "Please upload a document first."
 
@@ -207,4 +249,48 @@ class TOSAssistant:
         formatted = self.format_qwen_prompt(system_prompt, user_prompt)
 
         output = self.llm(formatted, max_tokens=400, temperature=0.0, stop=["<|im_end|>"], echo=False)
-        return output['choices'][0]['text']
+        
+        answer_text = output['choices'][0]['text']
+        cited_chunk_ids = self._extract_citations(answer_text)
+        coverage = self._calculate_coverage(answer_text, final_chunks)
+        quotes = self._extract_quotes(answer_text)
+        quality_flags = {
+            "coverage": coverage,
+            "has_quotes": len(quotes) > 0,
+            "num_quotes": len(quotes),
+            "passes_coverage_threshold": coverage >= min_coverage,
+            "passes_quote_requirement": not require_quote or len(quotes) > 0
+        }
+
+        if require_quote and len(quotes) == 0:
+            return {
+                "answer": "Answer lacks direct quotes from source material. Please rephrase your question.",
+                "sources": [],
+                "quality": quality_flags,
+                "warning": "No direct quotes found"
+            }
+    
+        if coverage < min_coverage:
+            quality_flags["warning"] = f"Low coverage ({coverage:.1%}), answer may contain hallucinations"
+        
+        cited_chunk_ids = self._extract_citations(answer_text)
+        sources = []
+
+        for chunk in final_chunks:
+            chunk_id = chunk.metadata['chunk_id']
+            if chunk_id in cited_chunk_ids or not cited_chunk_ids:
+                sources.append({
+                    "chunk_id": chunk_id,
+                    "page": chunk.metadata.get('page', 'n/a'),
+                    "snippet": chunk.page_content[:300] + "..." if len(chunk.page_content) > 300 else chunk.page_content,
+                    "full_text": chunk.page_content,
+                    "source_file": chunk.metadata.get('source', 'unknown')
+                })
+        
+        return {
+        "answer": answer_text,
+        "sources": sources,
+        "cited_chunks": list(cited_chunk_ids),
+        "quality": quality_flags,
+        "quotes": quotes
+        }
