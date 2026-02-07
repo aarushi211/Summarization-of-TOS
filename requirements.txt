@@ -8,3 +8,5 @@ llama-cpp-python
 huggingface-hub
 langchain-text-splitters
 sentence-transformers
+
+llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu

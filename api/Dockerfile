@@ -1,22 +1,24 @@
 FROM python:3.10-slim
 
-# Work dir
 WORKDIR /app
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y build-essential && rm -rf /var/lib/apt/lists/*
+# Install minimal system deps
+RUN apt-get update && apt-get install -y build-essential curl && rm -rf /var/lib/apt/lists/*
 
+# 1. Install llama-cpp-python BINARY explicitly
+# We use --extra-index-url AND --prefer-binary to ensure it grabs the pre-built wheel
+RUN pip install llama-cpp-python --prefer-binary
+
+# 2. Install other Python deps
 COPY api/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy API code
 COPY api/ .
 
-# Copy model artifact
-COPY data/model_artifacts/led_onnx_quantized/ ./model_artifacts/led_onnx_quantized/
+# Copy GGUF Model
+COPY data/model_artifact/qwen-merged-q4_k_m.gguf ./model_artifact/qwen-merged-q4_k_m.gguf
 
-# Expose Port
 EXPOSE 8080
 
-Run Command
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
