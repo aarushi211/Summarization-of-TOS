@@ -63,3 +63,10 @@ command.txt
 local_embed.py
 models/
 legacy/
+ragas_answered_questions_report.csv
+refusal_analysis.csv
+temp_webpage.txt
+ragas_checkpoints/
+faiss_index/
+Test_data.csv
+TOS_files/
