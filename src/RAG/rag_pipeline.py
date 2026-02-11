@@ -6,6 +6,7 @@ from langchain_community.vectorstores import FAISS
 from llama_cpp import Llama
 from sentence_transformers import CrossEncoder
 import re
+from langchain_community.document_loaders import TextLoader
 
 class TOSAssistant:
     def __init__(self, model_path, index_dir="faiss_index"):
@@ -27,14 +28,16 @@ class TOSAssistant:
 
         self.vector_store = None
         self.full_text = ""
-        self.doc_type = "Terms of Service"
+        self.doc_type = "Unkown Document"
         self.service_name = "Unknown Service"
 
     def clean_text(self, text):
         replacements = {
-            "Spoti": "Spotify",
-            "Spoti ": "Spotify ",
-            "ﬁ": "fi", "ﬂ": "fl", 
+            "ﬁ": "fi",
+            "ﬂ": "fl",
+            "ﬀ": "ff",
+            "ﬃ": "ffi",
+            "ﬄ": "ffl", 
             "": "",}
         
         for search, replace in replacements.items():
@@ -60,17 +63,33 @@ class TOSAssistant:
             doc.page_content = clean_text
         
         text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=1000, 
-            chunk_overlap=200
+            chunk_size=1200, 
+            chunk_overlap=300
         )
         chunks = text_splitter.split_documents(documents)
         
         self.vector_store = FAISS.from_documents(chunks, self.embed_model)
         print("Ingestion complete. Vector Store Ready.")
 
+    def ingest_text_file(self, txt_path):
+        print(f'Ingesting Text File {txt_path}...')
+        loader = TextLoader(txt_path, encoding='utf-8')
+        documents = loader.load()
+        
+        # Reuse your existing splitter logic
+        text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=1200, 
+            chunk_overlap=300
+        )
+        chunks = text_splitter.split_documents(documents)
+        
+        self.full_text = documents[0].page_content
+        self.vector_store = FAISS.from_documents(chunks, self.embed_model)
+        print("Text Ingestion complete.")
+
     def _get_relevant_chunks(self, query, top_k=5):
         candidates = self.vector_store.max_marginal_relevance_search(
-            query, k=20, fetch_k=50, lambda_mult=0.5
+            query, k=50, fetch_k=100, lambda_mult=0.5
         )
 
         pairs = [[query, doc.page_content] for doc in candidates]
@@ -113,7 +132,7 @@ class TOSAssistant:
         if not self.vector_store:
             return "Please ingest a document first."
 
-        relevant_docs = self._get_relevant_chunks(query, top_k=3)
+        relevant_docs = self._get_relevant_chunks(query, top_k=7)
         
         context_str = "\n\n".join([
             f"[Source {i+1}]: {doc.page_content}" 
