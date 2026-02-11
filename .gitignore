@@ -70,3 +70,4 @@ ragas_checkpoints/
 faiss_index/
 Test_data.csv
 TOS_files/
+get-pip.py
