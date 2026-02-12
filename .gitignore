@@ -60,3 +60,11 @@ data/model_artifact/
 models
 local_embed.py
 src/Job Submission
+legacy/
+ragas_answered_questions_report.csv
+ragas_checkpoints/
+refusal_analysis.csv
+temp_webpage.txt
+data/
+faiss_index/
+get-pip.py
