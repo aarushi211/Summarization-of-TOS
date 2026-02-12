@@ -17,7 +17,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY api/ .
 
 # Copy GGUF Model
-COPY data/model_artifact/qwen-merged-q4_k_m.gguf ./model_artifact/qwen-merged-q4_k_m.gguf
+COPY models/legal_qwen.Q4_K_M.gguf ./models/legal_qwen.Q4_K_M.gguf
 
 EXPOSE 8080
 

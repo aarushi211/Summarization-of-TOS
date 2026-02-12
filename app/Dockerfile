@@ -22,9 +22,8 @@ COPY src/RAG/ src/RAG/
 
 RUN mkdir -p /app/models/embeddings
 
-COPY models/legal_qwen.Q4_K_M.gguf /models/legal_qwen.Q4_K_M.gguf
+COPY models/legal_qwen.Q4_K_M.gguf /app/models/legal_qwen.Q4_K_M.gguf
 COPY models/embeddings/ /app/models/embeddings/
-
 
 
 EXPOSE 8080
