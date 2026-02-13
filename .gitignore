@@ -45,10 +45,14 @@ ipython_config.py
 TOS-Summarizer-Spaces/
 
 # --- Large Model Artifacts & Data ---
+*.gguf
 *.bin
 *.pt
 *.pth
+*.safetensors
 *.h5
+data/model_artifact/
+src/Job Submission/
 
 # --- IDE Settings (Optional but good practice) ---
 .vscode/
@@ -56,8 +60,6 @@ TOS-Summarizer-Spaces/
 
 temp_tos.pdf
 command.txt
-data/model_artifact/
-models
 local_embed.py
 src/Job Submission
 legacy/
@@ -67,4 +69,13 @@ refusal_analysis.csv
 temp_webpage.txt
 data/
 faiss_index/
+models/
+legacy/
+ragas_answered_questions_report.csv
+refusal_analysis.csv
+temp_webpage.txt
+ragas_checkpoints/
+faiss_index/
+Test_data.csv
+TOS_files/
 get-pip.py
