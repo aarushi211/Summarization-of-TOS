@@ -6,7 +6,7 @@
 # Explicitly ALLOW the files we need (Whitelist approach)
 !app/
 !src/
-!models/
+<!-- !models/ -->
 !requirements.txt
 !README.md
 !Dockerfile
