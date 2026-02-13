@@ -2,31 +2,27 @@ FROM python:3.10-slim
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-
-COPY requirements.txt .
-
-RUN pip install llama-cpp-python \
+RUN pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cpu
+RUN pip install --no-cache-dir llama-cpp-python \
     --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
 
+COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# RUN python -c "from langchain_huggingface import HuggingFaceEmbeddings; HuggingFaceEmbeddings(model_name='all-MiniLM-L6-v2')"
-# COPY models/embeddings/ /root/.cache/huggingface/hub/models--sentence-transformers--all-MiniLM-L6-v2/
-COPY app/ app/
-COPY src/RAG/ src/RAG/
+RUN apt-get purge -y --auto-remove build-essential
 
-RUN mkdir -p /app/models/embeddings
+COPY src/RAG/ /app/src/RAG/
+COPY app/app.py /app/app.py
+COPY app/download_models.py /app/download_models.py
 
-COPY models/legal_qwen.Q4_K_M.gguf /models/legal_qwen.Q4_K_M.gguf
-COPY models/embeddings/ /app/models/embeddings/
-
-
+RUN mkdir -p /app/models/embeddings /app/models/cross-encoder
 
 EXPOSE 8080
 
-CMD ["streamlit", "run", "app/app.py", "--server.port=8080", "--server.address=0.0.0.0"]
+CMD python /app/download_models.py && \
+    streamlit run /app/app.py --server.port=${PORT:-8080} --server.address=0.0.0.0

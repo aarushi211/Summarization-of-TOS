@@ -61,6 +61,14 @@ src/Job Submission/
 temp_tos.pdf
 command.txt
 local_embed.py
+src/Job Submission
+legacy/
+ragas_answered_questions_report.csv
+ragas_checkpoints/
+refusal_analysis.csv
+temp_webpage.txt
+data/
+faiss_index/
 models/
 legacy/
 ragas_answered_questions_report.csv

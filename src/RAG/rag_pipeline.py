@@ -20,11 +20,17 @@ class TOSAssistant:
             verbose=False
         )
 
+        SCRIPT_DIR = Path(__file__).resolve().parent
+        PROJECT_ROOT = SCRIPT_DIR.parent.parent
+        local_embed_path = PROJECT_ROOT / "models" / "embeddings"
+        local_cross_path = PROJECT_ROOT / "models" / "cross-encoder" / "ms-marco-MiniLM-L-6-v2"
+
         print("Loading Embeddings & Cross-Encoder...")
         self.embed_model = HuggingFaceEmbeddings(
-            model_name="sentence-transformers/all-MiniLM-L6-v2"
+            model_name=str(local_embed_path),
+            model_kwargs={"trust_remote_code": True}
         )
-        self.cross_encoder = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')
+        self.cross_encoder = CrossEncoder(str(local_cross_path))
 
         self.vector_store = None
         self.full_text = ""
