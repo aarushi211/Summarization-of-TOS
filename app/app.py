@@ -14,8 +14,7 @@ st.set_page_config(
     layout="wide"
 )
 
-SCRIPT_DIR = Path(__file__).resolve().parent
-PROJECT_ROOT = SCRIPT_DIR.parent
+PROJECT_ROOT = Path("/app")
 MODEL_PATH = PROJECT_ROOT / "models" / "legal_qwen.Q4_K_M.gguf"
 
 st.sidebar.title("ℹ️ About")
@@ -66,9 +65,13 @@ def scrape_tos_from_url(url):
 
 @st.cache_resource
 def load_rag_engine():
+    print(f"MODEL_PATH: {MODEL_PATH}")
+    print(f"MODEL_PATH exists: {MODEL_PATH.exists()}")
+    
     if not MODEL_PATH.exists():
         st.error(f"Model not found at: {MODEL_PATH}")
         st.stop()
+    
     return TOSAssistant(str(MODEL_PATH))
 
 rag = load_rag_engine()
