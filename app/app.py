@@ -13,8 +13,14 @@ st.set_page_config(
     page_icon="📜",
     layout="wide"
 )
+IS_CLOUD = os.getenv("CLOUD_RUN_ENV", "False") == "True"
+if IS_CLOUD:
+    PROJECT_ROOT = Path("/app")
+else:
+    print('Running on Local Machine')
+    SCRIPT_DIR = Path(__file__).resolve().parent
+    PROJECT_ROOT = SCRIPT_DIR.parent
 
-PROJECT_ROOT = Path("/app")
 MODEL_PATH = PROJECT_ROOT / "models" / "legal_qwen.Q4_K_M.gguf"
 
 st.sidebar.title("ℹ️ About")
