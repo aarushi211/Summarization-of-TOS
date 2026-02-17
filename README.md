@@ -8,8 +8,6 @@
 
 ## 🚀 Project Overview
 
-## 🚀 Project Overview
-
 **TOS-Summarizer** is a high-fidelity, dual-path AI system designed to solve the "Too Long; Didn't Read" problem of legal documents. By combining **Knowledge Distillation** with a **Dual-Path RAG architecture**, it distills 100+ page Terms of Service into actionable insights on low-cost, serverless infrastructure.
 
 | Feature | Technical Solution | Impact |
