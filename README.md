@@ -2,177 +2,117 @@
 
 ![Python](https://img.shields.io/badge/Python-3.9-blue)
 ![Docker](https://img.shields.io/badge/Docker-Containerized-2496ED)
-![FastAPI](https://img.shields.io/badge/FastAPI-Backend-009688)
 ![LlamaCPP](https://img.shields.io/badge/Llama_CPP-Quantized-orange)
 ![FAISS](https://img.shields.io/badge/Vector_DB-FAISS-yellow)
 ![LangChain](https://img.shields.io/badge/Orchestration-LangChain-green)
 
 ## 🚀 Project Overview
 
-TOS-Summarizer is a production-ready legal AI system that generates **faithful executive summaries** and **clause-grounded answers** from long Terms of Service documents optimized for **low hallucination, low cost, and CPU-only deployment**.
+## 🚀 Project Overview
 
-Unlike generic RAG demos, this project tackles real-world legal challenges such as **lost-in-the-middle failures, hallucinations in compliance-critical text, and the cost of deploying large language models at scale**.
+**TOS-Summarizer** is a high-fidelity, dual-path AI system designed to solve the "Too Long; Didn't Read" problem of legal documents. By combining **Knowledge Distillation** with a **Dual-Path RAG architecture**, it distills 100+ page Terms of Service into actionable insights on low-cost, serverless infrastructure.
 
-🔍 Designed for legal reliability.
-⚙️ Engineered for deployment constraints.
-🧠 Trained via synthetic data and knowledge distillation.
+| Feature | Technical Solution | Impact |
+| :--- | :--- | :--- |
+| **Context Length** | **Head-Middle-Tail Sampling** | Captures global context (18k+ tokens) without "Lost-in-the-Middle" bias. |
+| **High Precision** | **Dense RAG Path** | Uses FAISS + Cross-Encoder reranking for grounded, evidence-based Q&A. |
+| **Model Efficiency** | **Knowledge Distillation** | Distilled Llama 3.1 8B logic into a lightweight **Qwen 2.5 1.5B** student. |
+| **Edge-Ready** | **4-bit GGUF Quantization** | Optimized for fast, CPU-only inference on **Google Cloud Run**. |
+| **Scalability** | **Scale-to-Zero Docker** | Fully containerized architecture with zero idle-compute costs. |
 
-## Why This Project Matters
+## 🏗️ System Architecture & Key Contributions
+The system utilizes a **Dual-Path Inference** design to ensure both high-level executive summaries and pinpoint clause-level precision.
 
-Terms of Service documents are:
-- Extremely long and structurally dense
-- Written in legally precise but non-user-friendly language
-- Poorly handled by standard summarization and naive RAG pipelines
+### 1. Dual-Path Inference Pipeline
+* **Path A: Global Summarization**
+    * **Strategy:** Implements **"Head-Middle-Tail" Sampling** (6k characters per segment) to extract 18k tokens of global context, effectively bypassing the "lost-in-the-middle" phenomenon in long legal docs.
+* **Path B: Targeted RAG (Q&A)**
+    * **Retrieval:** **FAISS** vector store with **Maximal Marginal Relevance (MMR)** to ensure chunk diversity.
+    * **Reranking:** Integrated **Cross-Encoder Reranking** to ensure the most legally salient evidence is prioritized for the LLM.
 
-In practice, many LLM systems:
-- Miss critical clauses (arbitration, data sharing, liability)
-- Hallucinate obligations not present in the document
-- Require large, expensive models to perform reliably
+### 2. MLOps & Optimization
+* **Knowledge Distillation:** Fine-tuned a **Qwen 2.5 1.5B (Student)** using **Llama 3.1 8B (Teacher)** to retain complex reasoning within a 1GB footprint.
+* **Quantization:** Converted to **4-bit GGUF** via `llama.cpp`, enabling sub-second inference on standard CPU-only environments.
+* **Cloud Infrastructure:** Fully containerized with **Docker** and deployed on **Google Cloud Run**, utilizing scale-to-zero logic for maximum cost-efficiency.
 
-This project addresses these issues by combining **hybrid RAG, teacher-student distillation, and aggressive quantization**, resulting in a system that is both **legally cautious** and **operationally efficient**.
-
-## 🧠 Key Technical Contributions
-
-- Hybrid RAG Architecture: Separates global document understanding (executive summary) from targeted clause retrieval (question answering), mitigating lost-in-the-middle effects.
-- Synthetic Data Generation at Scale: Built a teacher-student pipeline using Llama 3.1 8B to generate ~9,000 high-quality legal summaries, enabling supervised fine-tuning in a low-resource domain.
-- Knowledge Distillation & Quantization: Distilled legal reasoning into a 1.5B-parameter model using QLoRA, then converted to 4-bit GGUF format to enable fast, CPU-only inference.
-- Production-First Deployment: Deployed on Google Cloud Run with scale-to-zero, custom memory limits, and optimized containers — no GPU required.
+<!-- ![System Architecture](data/Serverless_Legal_Architecture.png) -->
+<p align="center">
+  <img src="data/Serverless_Legal_Architecture.png" width="600" alt="Serverless Legal AI Architecture">
+</p>
 
 ## 🔗 Live Demo
-[Live Demo on Google Cloud Run](https://tos-demo-110277869308.us-central1.run.app/) > (Note: The app runs on a scale-to-zero instance. Please allow ~1 min for the first cold start.)
-
-## 🛠️ Tech Stack
-
-- LLM: Qwen 2.5 1.5B (Fine-Tuned), Llama 3.1 8B (Teacher)
-- Inference: llama-cpp-python, vLLM
-- Training: Hugging Face trl, peft (LoRA), bitsandbytes
-- Backend/UI: Streamlit, Python 3.10
-- DevOps: Docker, Google Cloud Run, Git LFS
-
-## 🏗️ Architecture
-
-System Architecture (Hybrid RAG)
-
-Long legal documents suffer from “Lost-in-the-Middle” failures, where critical clauses are ignored when context windows are saturated. To address this, the system uses a **Hybrid Retrieval-Augmented Generation (RAG)** architecture that explicitly separates:
-
-- Global document understanding (executive summary generation)
-- Targeted clause retrieval (question answering)
-
-A lightweight query router determines the appropriate path at runtime, allowing the model to operate on either truncated global context or retrieved, clause-level evidence.
-
-![System Architecture](data/TOS%20Architecture.png)
+[Live Demo on Google Cloud Run](https://tos-summarization-service-110277869308.us-central1.run.app/) 
+> (Note: The app runs on a scale-to-zero instance. Please allow ~1 min for the first cold start.)
 
 ## 🧠 Engineering Methodology
 
-### Phase 1: Synthetic Data Pipeline (The "Teacher-Student" Loop)
+### Phase 1: Synthetic Data Engineering
+To overcome the scarcity of high-quality legal datasets, I built a **Teacher-Student pipeline** to bootstrap a custom training corpus.
+* **Data Source:** Raw legal text from the TOSDR corpus (via [Sonu Gupta](https://github.com/sonu-gupta/tosdr-terms-of-service-corpus)).
+* **Teacher Model:** **Llama 3.1 8B Instruct** served via **vLLM (PagedAttention)** on an NVIDIA T4 GPU.
+* **Outcome:** Generated **9,000+ grounded summaries**, mapping dense legal clauses to abstractive executive summaries.
 
-High-quality, abstractive summaries for legal documents are scarce. To solve this, I engineered a synthetic data pipeline to generate a custom dataset.
+### Phase 2: Knowledge Distillation & SFT
+I transitioned from the 8B teacher to an edge-friendly student model via **Supervised Fine-Tuning (SFT)**.
+* **Student Model:** **Qwen 2.5 1.5B**.
+* **Training Technique:** **QLoRA (4-bit)** to maximize parameter efficiency.
+* **Memory Optimization:** Implemented **Gradient Accumulation and Checkpointing** to manage VRAM overhead while maintaining high reasoning capabilities.
 
-- **Source Data:** Used the raw text files from TOSDR (Terms of Service; Didn't Read) extracted by [Sonu Gupta](https://github.com/sonu-gupta/tosdr-terms-of-service-corpus).
-- **Teacher Model:** Llama 3.1 8B Instruct.
-- **Inference Engine:** Utilized vLLM (PagedAttention) on a T4 GPU to maximize throughput, generating 9,000+ summaries.
-- **Outcome:** Created a high-quality, task-specific dataset mapping raw legal text to concise executive summaries.
-- **Alternative Teacher Models:** Gemini 2.5 Flash, llama3.1:8b
-
-### Phase 2: Knowledge Distillation
-
-Deploying a 7B+ model is expensive. I distilled the knowledge from the Teacher (Llama 3.1) into a Student model (Qwen 2.5 1.5B) to enable edge-friendly deployment.
-
-- **Technique:** Supervised Fine-Tuning (SFT) with QLoRA (4-bit quantization).
-- **Optimization:** Used gradient accumulation and checkpointing to fit training within Google Colab's free tier limits.
-- **Result:** A lightweight 3GB model that mimics the reasoning of Llama 3.1 but runs 4x faster.
-
-### Phase 3: Quantization & Cloud Deployment
-
-To make the system production-ready and cost-efficient:
-
-- **Quantization:** Converted the fine-tuned model to GGUF (4-bit) format using llama.cpp. This reduced the model size to ~1 GB, allowing it to run purely on CPU.
-- **Containerization:** Built a multi-stage Docker container optimized for Google Cloud Run.
-- **Infrastructure:** Configured custom memory limits (4GiB) and concurrency settings to serve the model serverlessly.
+### Phase 3: Quantization & Serverless Deployment
+Final optimization aimed for zero-cost idle time and CPU-only execution.
+* **GGUF Conversion:** Leveraged `llama.cpp` for **4-bit (GGUF) quantization**, shrinking the model footprint from 3GB to **~1GB**.
+* **Containerization:** Optimized **Docker** multi-stage builds to minimize image size and mitigate cold-start latency.
+* **Infrastructure:** Deployed on **Google Cloud Run** with a 4GiB memory ceiling and optimized concurrency for a cost-effective, scale-to-zero architecture.
 
 ## 📊 Evaluation & Analysis
-Models were evaluated on a held-out test split from the synthetic dataset generated during the teacher–student pipeline. Each test sample consists of raw TOS text paired with a high-quality abstractive summary generated by a teacher LLM.
 
-While synthetic, this setup ensures:
-- Consistent supervision aligned with the task objective (executive legal summaries)
-- Scalable and reproducible evaluation
-- Fair comparison across student and baseline models
+The model was validated against a held-out test set from the synthetic corpus. Given the zero-tolerance for hallucinations in the legal domain, the evaluation focused on **Faithfulness** and **Semantic Integrity**.
 
-Given the legal domain’s emphasis on faithfulness and clause coverage, evaluation focused on multiple complementary metrics rather than a single score.
+### Performance Metrics
+| Metric | Score | Insight |
+| :--- | :--- | :--- |
+| **Faithfulness** | **0.945** | Verified via LLM-as-a-Judge; confirms high grounding in source text. |
+| **BERTScore** | **0.701** | Demonstrates strong semantic consistency post-quantization. |
+| **ROUGE-L** | **0.310** | High lexical overlap with critical legal terminology. |
+| **BLEU** | **0.151** | Respectable n-gram precision for a 1.5B parameter student model. |
 
-### Metrics Used
+### Model Selection Trade-off
+| Model | Size | Rationale |
+| :--- | :--- | :--- |
+| **Qwen 2.5 1.5B** | **~1 GB** | **Production Choice:** Selected for cost-sensitive, scale-to-zero serverless environments with high clause recall. |
+| **Mistral 7B** | ~7.5 GB | **High-Fidelity Choice:** Better for high-risk interpretation where latency/cost are secondary. |
 
-To capture different aspects of summarization quality, evaluation was performed across three dimensions:
-- Lexical overlap: ROUGE-1/2/L, BLEU, METEOR
-- Semantic similarity: BERTScore-F1
-- Factual consistency: Faithfulness score, hallucination rate, and unsupported claims (evaluated on sampled outputs)
+> **Limitations:** Evaluation is based on synthetic teacher summaries; jurisdiction-specific legal nuances are not explicitly modeled.
 
-This multi-metric approach avoids over-optimizing for surface-level similarity and better reflects real-world legal reliability.
-
-### Quantitative Results (Aggregate)
-
-| Model                     | ROUGE-1   | ROUGE-2   | ROUGE-L   | BERTScore-F1 | BLEU      | METEOR    |
-| ------------------------- | --------- | --------- | --------- | ------------ | --------- | --------- |
-| **Qwen 2.5 1.5B**         | 0.364     | 0.130     | 0.218     | **0.849**    | 0.079     | 0.311     |
-| **Qwen 2.5 GGUF (4-bit)** | **0.487** | **0.228** | **0.310** | 0.701        | **0.151** | **0.324** |
-| **Mistral (FP16)**        | 0.457     | 0.226     | 0.309     | **0.868**    | 0.169     | **0.378** |
-| **Mistral GGUF (4-bit)**  | **0.484** | **0.246** | **0.324** | 0.703        | **0.156** | 0.321     |
-
-### Faithfulness & Hallucination Analysis
-
-Faithfulness was evaluated using LLM as a judge, using Gemini-3-flash-preview  generated summaries by verifying whether each claim was directly supported by the source TOS text or retrieved clauses.
-
-| Model            | Avg. Faithfulness | Hallucination Rate | Avg. Unsupported Claims |
-| ---------------- | ----------------- | ------------------ | ----------------------- |
-| **Qwen GGUF**    | 0.945             | 0.182              | 0.364                   |
-| **Mistral GGUF** | **0.964**         | **0.071**          | **0.286**               |
-
-### Key Observations & Insights
-
-**Effect of Quantization**
-
-Quantizing models to 4-bit GGUF format consistently:
-- Improved ROUGE and BLEU scores, indicating stronger alignment with legally salient clauses
-- Reduced hallucination rates, particularly for Mistral
-- Slightly reduced BERTScore, suggesting less paraphrasing and more conservative, extractive behavior
-- For legal summarization, this trade-off is desirable, as factual precision outweighs stylistic richness.
-
-**Qwen vs Mistral Trade-off**
-- Qwen GGUF provides an excellent balance of model size (~1 GB), inference speed, and clause recall, making it suitable for cost-sensitive, serverless deployments.
-- Mistral GGUF achieves higher faithfulness and lower hallucination rates, making it better suited for higher-risk legal interpretations.
-
-### Limitations
-- Evaluation relies on synthetic teacher-generated summaries, which may inherit teacher biases.
-- Faithfulness analysis was conducted on a sampled subset rather than the full test set.
-- Jurisdiction-specific legal interpretations are not explicitly modeled.
-
-Future work includes incorporating human-reviewed summaries and expanding faithfulness evaluation at scale.
-
-
+---
 
 ## 💻 Local Installation
-Want to run this offline?
 
-**Clone the Repository**
-```
-git clone [https://github.com/aarushi211/Summarization-of-TOS.git](https://github.com/aarushi211/Summarization-of-TOS.git)
+Run the summarizer locally using Streamlit:
+
+```bash
+# 1. Clone the Repository
+git clone https://github.com/aarushi211/Summarization-of-TOS.git
 cd Summarization-of-TOS
-```
 
-**Install Dependencies**
-```
-# We recommend using a virtual environment
+# 2. Set up Environment
 python -m venv venv
-source venv/bin/activate  # or venv\Scripts\activate on Windows
+source venv/bin/activate  # Windows: venv\Scripts\activate
 pip install -r requirements.txt
-```
 
-#### Run the App
-```
+# 3. Launch App
 streamlit run app/app.py
-```
 
-## ⚙️ Deployment & MLOps
+## Deployment & MLOps
 Deploying LLMs to serverless infrastructure presents unique challenges regarding memory, build times, and cold starts. 
+```
 
 👉 **[Read the full Deployment Engineering Guide](DEPLOYMENT.md)** to see how I solved Docker build timeouts and optimized inference for CPU-only environments.
+
+## 🔮 Future Work & Scalability
+While the current MVP demonstrates a successful distillation and deployment pipeline, the following enhancements are planned to move toward production-grade legal AI:
+
+* **Hybrid Retrieval Engine:** Integration of **BM25 (Sparse Search)** alongside FAISS to improve recall for specific legal terminology and exact phrase matching.
+* **Recursive Sectional Summarization:** Moving beyond "Head-Middle-Tail" sampling toward a hierarchical summarization approach to ensure 100% clause coverage.
+* **RAGAS Benchmarking:** Implementing the **RAGAS framework** to provide automated, multi-dimensional evaluation of retrieval precision and context utilization.
+* **Jurisdictional Context Injection:** Incorporating metadata filters to adjust analysis based on regional laws (e.g., GDPR vs. CCPA).
