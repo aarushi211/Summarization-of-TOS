@@ -115,7 +115,14 @@ class TOSAssistant:
         if not self.full_text:
             return "No document loaded."
 
-        truncated_text = self.full_text[:20000]
+        total_len = len(self.full_text)
+        samples = [
+            self.full_text[:6000],          
+            self.full_text[total_len//2-3000:total_len//2+3000],  
+            self.full_text[-6000:]           
+        ]
+        
+        truncated_text = "\n[...]\n".join(samples)
 
         system_prompt = "You are a legal expert. Summarize the following Terms of Service. Focus on user rights and data privacy."
         
