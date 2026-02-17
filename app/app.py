@@ -110,7 +110,8 @@ with tab1:
                 st.success(f"✅ Processed PDF: {uploaded_file.name}")
 
 with tab2:
-    url_input = st.text_input("Enter the direct link to Terms of Service page")
+    st.info("Best for static pages. If the scraping fails, try downloading the page as a PDF.")
+    url_input = st.text_input("Enter the direct link")
     
     if not url_input:
         st.caption("Don't have the link? [Search Google for 'Terms of Service'](https://www.google.com/search?q=terms+of+service)")
