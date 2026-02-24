@@ -1,4 +1,4 @@
-FROM python:3.10-slim
+FROM python:3.11-slim
 
 WORKDIR /app
 
@@ -14,15 +14,12 @@ RUN pip install --no-cache-dir llama-cpp-python \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-RUN apt-get purge -y --auto-remove build-essential
-
 COPY src/RAG/ /app/src/RAG/
 COPY app/app.py /app/app.py
-COPY app/download_models.py /app/download_models.py
-
-RUN mkdir -p /app/models/embeddings /app/models/cross-encoder
+# COPY models/legal_qwen.Q4_K_M.gguf app/models/legal_qwen.Q4_K_M.gguf
+# COPY models/cross-encoder/ms-marco-MiniLM-L-6-v2 app/models/cross-encoder/ms-marco-MiniLM-L-6-v2
+# COPY models/embeddings app/models/embeddings
 
 EXPOSE 8080
 
-CMD python /app/download_models.py && \
-    streamlit run /app/app.py --server.port=${PORT:-8080} --server.address=0.0.0.0
+CMD ["sh", "-c", "streamlit run /app/app.py --server.port=${PORT:-8080} --server.address=0.0.0.0"]

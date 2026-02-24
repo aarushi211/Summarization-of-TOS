@@ -7,6 +7,7 @@ from llama_cpp import Llama
 from sentence_transformers import CrossEncoder
 import re
 from langchain_community.document_loaders import TextLoader
+import os
 
 class TOSAssistant:
     def __init__(self, model_path, index_dir="faiss_index"):
@@ -15,15 +16,19 @@ class TOSAssistant:
         print(f"Loading RAG Model: {Path(model_path).name}")
         self.llm = Llama(
             model_path=model_path,
-            n_ctx=8192,
-            n_gpu_layers=-1,
-            verbose=False
+            n_ctx=6144,
+            verbose=False,
+            offload_kqv=False
         )
 
-        SCRIPT_DIR = Path(__file__).resolve().parent
-        PROJECT_ROOT = SCRIPT_DIR.parent.parent
-        local_embed_path = PROJECT_ROOT / "models" / "embeddings"
-        local_cross_path = PROJECT_ROOT / "models" / "cross-encoder" / "ms-marco-MiniLM-L-6-v2"
+        if os.getenv("CLOUD_RUN_ENV") == "True":
+            base_model_path = Path("/models")
+        else:
+            SCRIPT_DIR = Path(__file__).resolve().parent
+            base_model_path = SCRIPT_DIR.parent.parent / "models"
+
+        local_embed_path = base_model_path / "embeddings"
+        local_cross_path = base_model_path / "cross-encoder" / "ms-marco-MiniLM-L-6-v2"
 
         print("Loading Embeddings & Cross-Encoder...")
         self.embed_model = HuggingFaceEmbeddings(
@@ -115,7 +120,7 @@ class TOSAssistant:
         if not self.full_text:
             return "No document loaded."
 
-        truncated_text = self.full_text[:20000]
+        truncated_text = self.full_text[:15000]
 
         system_prompt = "You are a legal expert. Summarize the following Terms of Service. Focus on user rights and data privacy."
         

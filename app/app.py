@@ -13,9 +13,15 @@ st.set_page_config(
     page_icon="📜",
     layout="wide"
 )
+IS_CLOUD = os.getenv("CLOUD_RUN_ENV", "False") == "True"
+if IS_CLOUD:
+    MODEL_DIR = Path("/models")
+else:
+    print('Running on Local Machine')
+    SCRIPT_DIR = Path(__file__).resolve().parent
+    MODEL_DIR = SCRIPT_DIR.parent / "models"
 
-PROJECT_ROOT = Path("/app")
-MODEL_PATH = PROJECT_ROOT / "models" / "legal_qwen.Q4_K_M.gguf"
+MODEL_PATH = MODEL_DIR / "legal_qwen.Q4_K_M.gguf"
 
 st.sidebar.title("ℹ️ About")
 st.sidebar.info("Legal Document Summarizer powered by Qwen 2.5 (Fine-Tuned)")
@@ -104,7 +110,8 @@ with tab1:
                 st.success(f"✅ Processed PDF: {uploaded_file.name}")
 
 with tab2:
-    url_input = st.text_input("Enter the direct link to Terms of Service page")
+    st.info("Best for static pages. If the scraping fails, try downloading the page as a PDF.")
+    url_input = st.text_input("Enter the direct link")
     
     if not url_input:
         st.caption("Don't have the link? [Search Google for 'Terms of Service'](https://www.google.com/search?q=terms+of+service)")
