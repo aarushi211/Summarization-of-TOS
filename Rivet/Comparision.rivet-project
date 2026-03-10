@@ -1,0 +1,774 @@
+version: 4
+data:
+  attachedData:
+    trivet:
+      testSuites:
+        - id: HMePtlhj_z6pGpC7LpAFp
+          testCases: []
+          testGraph: a
+          validationGraph: a
+      version: 1
+  graphs:
+    jpKjnxY_SVKUm9ecHSzb_:
+      metadata:
+        description: ""
+        id: jpKjnxY_SVKUm9ecHSzb_
+        name: Faithfulness
+      nodes:
+        '[0wX3AXDemghY-1K-1dVPE]:text "Text"':
+          data:
+            normalizeLineEndings: true
+            text: "## Comparison: Finetuned Model Performance\r
+
+              \r
+
+              | Metric | Model 1 (Base/Previous) | Model 2 (New
+              Finetune) |\r
+
+              | :--- | :--- | :--- |\r
+
+              | **Faithfulness Score** | {{score1}} | {{score2}}
+              |\r
+
+              | **Unsupported Claims** | {{claims1}} | {{claims2}}
+              |\r
+
+              | **Meaning Changes** | {{changes1}} | {{changes2}}
+              |\r
+
+              \r
+
+              ### Qualitative Analysis\r
+
+              **Model 1 Errors:** {{changes1}}\r
+
+              **Model 2 Errors:** {{changes2}}"
+          visualData: 3646.464168811584/133.4572651599876/330/191//
+        '[1Sck4Wo5l_LeH101ut9w4]:ollamaChat2 "Qwen 2.5 Instruct"':
+          data:
+            additionalParameters: []
+            advancedOutputs: false
+            jsonMode: false
+            model: qwen2.5:1.5b-instruct
+            numPredict: 1000
+            stop: "[SUMMARY END]"
+            temperature: 0.1
+            useModelInput: false
+          outgoingConnections:
+            - output->"Compare Base" res_6e3Yqw_194ZXACm2K/ORIGINAL
+          visualData: 500.7170804213662/-246.95891151589558/280/177//
+        '[2UGPdSPeVJDbISlpyvocV]:comment "Comment"':
+          data:
+            backgroundColor: rgba(221,3,3,0.05)
+            color: rgba(233,4,4,1)
+            height: 163.8810116395431
+            text: "### 1.5B Distilled Inference"
+          visualData: 471.06909643076085/-428.10058928236754/371.39662786818974/173//
+        '[3efGu2AClhDtTiEIcYXXI]:chat "Chat"':
+          data:
+            additionalParameters: []
+            cache: false
+            enableFunctionUse: false
+            endpoint: https://api.groq.com/openai/v1/chat/completions
+            headers: []
+            maxTokens: 1024
+            modalitiesIncludeAudio: false
+            modalitiesIncludeText: false
+            model: gpt-5
+            outputUsage: false
+            overrideModel: llama-3.3-70b-versatile
+            parallelFunctionCalling: true
+            reasoningEffort: ""
+            stop: ""
+            temperature: 0.1
+            top_p: 1
+            useAdditionalParametersInput: false
+            useAsGraphPartialOutput: true
+            useFrequencyPenaltyInput: false
+            useMaxTokensInput: false
+            useModelInput: false
+            usePredictedOutput: false
+            usePresencePenaltyInput: false
+            useReasoningEffortInput: false
+            useServerTokenCalculation: true
+            useStop: false
+            useStopInput: false
+            useTemperatureInput: false
+            useTopP: false
+            useTopPInput: false
+            useUseTopPInput: false
+            useUserInput: false
+          outgoingConnections:
+            - response->"Extract Regex" vWtEHV0OR9tNEOweHdTfa/input
+          visualData: 1519.8691079593748/339.4927877054628/230/209//
+        '[5QIGonQgY27TFsvC_5p3H]:comment "Comment"':
+          data:
+            backgroundColor: rgba(221,4,4,0.05)
+            color: rgba(212,210,210,1)
+            height: 340.54223469996845
+            text: "#### ⚠️ Engineering Discovery: Memorization vs. Context\r
+
+              <span style=\"font-size:20px;\">Rivet allowed me to
+              identify a critical 'Grounding Gap' in the 1.5B model. While it
+              achieved 94% on semantic similarity, this auditor caught it
+              hallucinating standard CCPA boilerplate (the '45-day rule') that
+              it had memorized from the training set but wasn't in the actual
+              document. This insight proved that for legal AI, stylistic
+              distillation must be paired with strict context-verification
+              logic.</span>"
+          visualData: 4268.431273844256/134.93566835093273/597.2113813082378/190//
+        '[8x2JDmKdXmIy0LGEVaBEW]:extractObjectPath "Faithfulness Score"':
+          data:
+            path: $.faithfulness_score
+            usePathInput: false
+          outgoingConnections:
+            - match->"Text" 0wX3AXDemghY-1K-1dVPE/score2
+          visualData: 3051.6147941935033/926.549757794347/280/210//
+        '[9alzOEraLZIuIYk4Jwhds]:array "Array"':
+          data:
+            flatten: true
+            flattenDeep: false
+          outgoingConnections:
+            - output->"Extract JSON" ipJK8W-IK0YvuoMiDjakr/input
+          visualData: 2340.25795608882/372.9809501285107/230/204//
+        '[AMkHd3M9Q5Tboki4qcSJ1]:ollamaChat2 "Ollama Chat"':
+          data:
+            additionalParameters: []
+            advancedOutputs: false
+            jsonMode: false
+            model: legal-finetune:latest
+            numCtx: 8192
+            numPredict: 1023
+            repeatPenalty: 1.2
+            stop: ""
+            temperature: 0.1
+            useModelInput: false
+          outgoingConnections:
+            - output->"Compare with Fine-tuned" F7SqOzQNes05DPibdL73n/SUMMARY
+          visualData: 529.8209238137299/242.49157711599102/280/179//
+        '[AdeqKMQk8grOuqBV1C7P2]:extractObjectPath "Unsupported Claims"':
+          data:
+            path: $.unsupported_claims
+            usePathInput: false
+          outgoingConnections:
+            - match->"Text" 0wX3AXDemghY-1K-1dVPE/claims1
+          visualData: 3045.5547816300427/64.40919454409196/280/214//
+        '[DwYkqgffvv1mgfyg4-6L0]:comment "Comment"':
+          data:
+            backgroundColor: rgba(253,4,4,0.05)
+            color: rgba(228,4,4,1)
+            height: 101.04275903840096
+            text: "### Comparision Table"
+          visualData: 3555.5291795596218/-31.9188355829908/535.9109202758127/192//
+        '[F7SqOzQNes05DPibdL73n]:text "Compare with Fine-tuned"':
+          data:
+            normalizeLineEndings: true
+            text: "You are a Legal Compliance Reviewer. Compare SUMMARY vs ORIGINAL.\r
+
+              Rules:\r
+
+              1. Penalize ONLY: Contradictions, unsupported
+              claims, or meaning changes (e.g., \"may\" to \"must\").\r
+
+              2. Omissions are NOT errors unless the summary
+              claims to be exhaustive.\r
+
+              3. Scoring: 1.0 (perfect) to 0.0 (materially
+              wrong).\r
+
+              \r
+
+              Output ONLY raw JSON:\r
+
+              {\r
+
+              \  \"hallucinations\": boolean,\r
+
+              \  \"unsupported_claims\": [\"string\"],\r
+
+              \  \"meaning_changes\": [\"string\"],\r
+
+              \  \"faithfulness_score\": float\r
+
+              }\r
+
+              \r
+
+              Original Terms of Service:\r
+
+              {{ORIGINAL}}\r
+
+              \r
+
+              Generated Summary:\r
+
+              {{SUMMARY}}"
+          outgoingConnections:
+            - output->"Chat" 3efGu2AClhDtTiEIcYXXI/prompt
+          visualData: 1010.0799645315543/244.76180062281702/330/130//
+        '[FR4hHSZj5VANRp5QoofGd]:text "Prompt"':
+          data:
+            normalizeLineEndings: true
+            text: "You are a legal expert who writes clear, simplified, abstractive
+              summaries of policy documents. Your goal is to help users
+              understand the key rules without legal jargon.\r
+
+              \r
+
+              Instructions:\r
+
+              1. Summarize the document in 200–350 words. \r
+
+              2. Use a single, fluent paragraph (no headings or
+              bullets). \r
+
+              3. Focus exclusively on: user responsibilities and
+              liabilities, privacy rights, data usage/sharing/storage,
+              payment/account rules, and termination clauses. \r
+
+              4. Keep the tone simplified, factual, and neutral.
+              \r
+
+              5. CRITICAL: Only include facts explicitly supported
+              by the provided text. \r
+
+              \r
+
+              Document Text:\r
+
+              {{tos_text}}"
+          outgoingConnections:
+            - output->"Ollama Chat" AMkHd3M9Q5Tboki4qcSJ1/messages
+            - output->"Qwen 2.5 Instruct" 1Sck4Wo5l_LeH101ut9w4/messages
+          visualData: 40.59086199763988/-205.1871507669238/330/170//
+        '[FjlTa6CYYDbpDUv-9uJtY]:array "Array"':
+          data:
+            flatten: true
+            flattenDeep: false
+          outgoingConnections:
+            - output->"Extract JSON" PEE2g4gLaHNdMRJEvQJgs/input
+          visualData: 2300.5522849486415/-87.63994821993046/230/206//
+        '[IAT340okJc2q_ekWPJCTt]:text "TOS Input"':
+          data:
+            normalizeLineEndings: true
+            text: "Netflix Brand Assets Terms & Conditions\r
+
+              By downloading or otherwise receiving from Netflix
+              any Netflix trademarks, logos, trade names, service marks, service
+              names, or other distinctive features owned by Netflix (“Netflix
+              Brand Assets”) via the Netflix Brand Site, located at
+              brand.netflix.com, or other Netflix website, or otherwise from
+              Netflix, you (“You”) agree to be bound by the following terms and
+              conditions (“Terms”). In the event of any conflict between these
+              Terms and any applicable written agreement between You and
+              Netflix, the written agreement shall prevail.\r
+
+              \r
+
+              Your Rights To Use Netflix Brand Assets\r
+
+              Netflix grants You a limited, non-exclusive,
+              revocable, non-sublicensable and non-transferable license to
+              display the Netflix Brand Assets in accordance with these Terms.
+              All use by You of the Netflix Brand Assets (including any goodwill
+              associated therewith) shall inure to the benefit of Netflix. You
+              agree that You shall not challenge, or assist others to challenge,
+              the Netflix Brand Assets or the registration or ownership thereof
+              by Netflix (except to the extent such restriction is prohibited by
+              applicable law), or attempt to register any Netflix Brand Assets
+              or other names, logos, marks, or materials (including domain
+              names) that are confusingly similar in any way (including but not
+              limited to, sound, appearance and spelling) to any Netflix Brand
+              Assets. The Netflix Brand Assets are provided \"as is\" and
+              Netflix disclaims all express and implied warranties, including
+              warranties of noninfringement. Netflix shall not be liable to You
+              under any theory of liability for any direct, indirect,
+              incidental, special, consequential, punitive, exemplary or other
+              damages arising out of the Netflix Brand Assets or Your use
+              thereof. This limitation shall apply even if Netflix was advised
+              of, or should have been aware of, the possibility of such damages.
+              Some jurisdictions do not allow certain exclusions or limitations;
+              in such jurisdictions, the exclusions and limitations stated in
+              these Terms shall apply to You to the maximum extent permitted by
+              law. Nothing herein grants You any right, title or interest in or
+              to the Netflix Brand Assets.\r
+
+              \r
+
+              Requirements\r
+
+              All of Your uses of the Netflix Brand Assets in any
+              of Your marketing, advertising, content, or other material (\"Your
+              Materials\") are subject to Netflix's approval prior to use.
+              Approval for such uses must be submitted via a request for
+              approval on the Netflix Partner Portal (a \"Request for
+              Approval\"). Netflix's silence or failure to respond to requests
+              does not constitute approval, and approval of one of Your
+              Materials does not constitute approval of Your other uses, nor may
+              such approval be transferred to any third party without Netflix's
+              written consent. To the extent Netflix does not provide express
+              approval, You shall not use Netflix Brand Assets. Netflix's
+              approval of any uses of the Netflix Brand Assets shall not be
+              construed as approval of Your Materials for compliance with
+              applicable laws, rules or regulations, such being Your sole
+              responsibility.\r
+
+              \r
+
+              If You wish to use a Netflix Brand Asset in any way
+              not permitted under these terms, please submit a Request for
+              Approval. In Your request, describe how and if Your use of the
+              Netflix Brand Assets would deviate from these Terms, and why such
+              use should be approved by Netflix. Netflix will consider the
+              request, but does not guarantee any particular response time or
+              approval.\r
+
+              \r
+
+              All uses of the Netflix Brand Assets must conform to
+              the Netflix Brand Guidelines, located at
+              https://brand.netflix.com, as well as the following requirements,
+              unless You have prior written permission from Netflix:\r
+
+              \r
+
+              No Modification. The Netflix Brand Assets must be
+              used as provided by Netflix with no modifications. Do not remove,
+              distort or alter any element of the Netflix Brand Assets or change
+              any colors. Do not shorten, abbreviate, or create acronyms out of
+              the Netflix Brand Assets.\r
+
+              \r
+
+              No Generic Use. Do not use Netflix Brand Assets in a
+              way that suggests a common, descriptive, or generic meaning.\r
+
+              \r
+
+              No Plural or Possessive Use. Do not use the Netflix
+              Brand Assets in the plural or possessive form.\r
+
+              \r
+
+              No Incorporation. Do not incorporate Netflix Brand
+              Assets into Your own product name, service names, trademarks,
+              logos, company names, domain names, website titles, publication
+              titles, or the like, unless expressly permitted by Netflix.\r
+
+              \r
+
+              No confusingly similar marks. Do not use the Netflix
+              Brand Assets, including any Netflix trademark, in a manner that
+              might create confusion about the ownership of the Netflix Brand
+              Assets.\r
+
+              \r
+
+              No confusing source. Do not use the Netflix Brand
+              Assets, including any Netflix trademark, in a manner that implies
+              that Netflix is the source of Your products or service, or that
+              otherwise might create confusion about the source of the Netflix
+              Brand Assets.\r
+
+              \r
+
+              Domain names. Do not register the Netflix Brand
+              Assets, including any Netflix trademark, as domain names or as any
+              part of a domain name.\r
+
+              \r
+
+              Trade dress. Do not copy or imitate Netflix's
+              website design, typefaces, distinctive color, style, graphic
+              designs, or imagery.\r
+
+              \r
+
+              Endorsement. Do not display the Netflix Brand Assets
+              in any manner that (i) overstates Your relationship with Netflix;
+              (ii) implies that You have a relationship or affiliation with
+              Netflix; (iii) implies You sponsored or endorsed by Netflix; (iv)
+              implies that any content has been authorized by Netflix; or (v)
+              represents the views or opinions of Netflix or Netflix personnel
+              unless You have prior written permission from Netflix to do so.\r
+
+              \r
+
+              Prominence. Do not display the Netflix Brand Assets
+              in a manner that makes it the most distinctive or prominent
+              feature on Your web page, printed material, or other content
+              without express written permission from Netflix to do so.\r
+
+              \r
+
+              Violation of Law. Do not display the Netflix Brand
+              Assets on any website that contains, displays, or promotes
+              pornography or like adult content, or gambling, the sale of
+              tobacco, alcohol, or firearms to persons under twenty-one (21)
+              years of age.\r
+
+              \r
+
+              Objectionable Use. Do not display the Netflix Brand
+              Assets in a manner that is misleading, unfair, defamatory,
+              infringing, libelous, disparaging, obscene, or otherwise
+              objectionable to Netflix.\r
+
+              \r
+
+              Broadcast. The Netflix Brand Assets may not be used
+              in television, film, or video without Netflix's prior written
+              permission. Please submit Request for Approval to use the Netflix
+              Brand Assets in this manner.\r
+
+              \r
+
+              Book or Other Publication Titles. The Netflix Brand
+              Assets may not be displayed in titles of publications, including
+              books, without Netflix's prior written permission. Please submit a
+              Request for Approval to use the Netflix Brand Assets in this
+              manner.\r
+
+              \r
+
+              Merchandise. The Netflix Brand Assets may not be
+              used or displayed in or on merchandise or manufactured items of
+              any kind without Netflix's prior written permission. Please submit
+              a Request for Approval to use the Netflix Brand Assets in this
+              manner.\r
+
+              \r
+
+              Netflix's Rights\r
+
+              Netflix will interpret Your compliance with these
+              Terms in its sole discretion. Netflix may modify or terminate Your
+              permission to display or use the Netflix Brand Assets at any time.
+              Netflix may take action against any use of the Netflix Brand
+              Assets that does not comply with these terms or written permission
+              from Netflix, infringes any Netflix owned or licensed intellectual
+              property or other right, or violates applicable law.\r
+
+              \r
+
+              General Provisions\r
+
+              You may not assign Your rights or delegate Your
+              obligations under these Terms without Netflix's prior written
+              consent. These Terms do not create any rights in any third party.
+              These Terms will be governed and construed in accordance with the
+              laws of the State of California, without regard to conflict of law
+              principles. The venue for any dispute or claim shall be Santa
+              Clara County, California. Neither party shall be deemed to be an
+              employee, agent, partner, or legal representative of the other.
+              Netflix's waiver of breach of any provision of these Terms shall
+              not be deemed to be a waiver of the Terms themselves. If any
+              provision of these Terms is held by a court of competent
+              jurisdiction to be illegal, void, or unenforceable, such provision
+              shall be changed and interpreted so as best to accomplish the
+              objectives of the original provision to the fullest extent allowed
+              by law and the remaining provisions of these Terms shall remain in
+              full force and effect.\r
+
+              \r
+
+              Netflix Materials License Agreement\r
+
+              By downloading or otherwise receiving from Netflix
+              the Netflix artwork, images, graphics, photographs, clips, video,
+              audio, text, title art, or other content available on the Netflix
+              Brand Site at http://brand.netflix.com (the \"Netflix Brand
+              Site\") (collectively, the \"Netflix Materials\"), you (\"You\")
+              agree to be bound by the following terms and conditions (the
+              \"Agreement\"). You agree to comply with the Netflix Brand Asset
+              Terms and Conditions and to the terms set forth on the Netflix
+              Brand Site. So long as You do so, and provided You are a Netflix
+              partner, Netflix, Inc. and its affiliates (\"Netflix\") hereby
+              grants to You, a worldwide, non-exclusive, non-transferable,
+              non-assignable, royalty-free, revocable license to use the Netflix
+              Materials solely as approved by Netflix for the promotion of
+              Netflix or its programming, including in Your Netflix partner
+              promotional materials and co-branded promotional advertising.\r
+
+              \r
+
+              The Netflix Materials are owned by Netflix, its
+              affiliated companies or licensors, and are rights protectable as
+              intellectual property or otherwise. The Netflix Materials, and all
+              uses thereof, shall at all times be and remain the exclusive
+              property of Netflix or its designee. You shall not use the Netflix
+              Materials in any manner that is objectionable to Netflix, at
+              Netflix's sole discretion. Netflix reserves the right in its sole
+              discretion to terminate or modify Your permission to use the
+              Netflix Materials, and take action against any use that does not
+              conform to the terms of this Agreement, infringes any Netflix
+              intellectual property or other right, or violates applicable
+              law.\r
+
+              \r
+
+              Except as expressly set forth herein, no rights
+              (either by implication, estoppel, or otherwise) are granted to
+              You. Your use of the Netflix Materials will inure to the benefit
+              of Netflix. All Netflix Materials distributed herein are \"as
+              is,\" \"as available\" and \"with all faults\" without warranties
+              of any kind, either express or implied, including, without
+              limitation, warranties of title or implied warranties of
+              merchantability, non-infringement of any third party right or
+              fitness for a particular purpose or those arising by statute or
+              otherwise in law or from a course of dealing or usage of trade.\r
+
+              \r
+
+              All of Your uses of the Netflix Materials in any of
+              Your marketing, advertising, content, or other material (\"Your
+              Materials\") are subject to Netflix's approval prior to use.
+              Approval for such uses must be submitted via a request for
+              approval on the Netflix Brand Site (a \"Request for Approval\").
+              Netflix's silence or failure to respond to requests does not
+              constitute approval, and approval of one of Your Materials does
+              not constitute approval of Your other uses, nor may such approval
+              be transferred to any third party without Netflix's written
+              consent. To the extent Netflix does not provide express approval,
+              You shall not use Netflix Materials. Netflix's approval of any
+              uses of the Netflix Materials shall not be construed as approval
+              of Your Materials for compliance with applicable laws, rules or
+              regulations, such being Your sole responsibility.\r
+
+              \r
+
+              By downloading the Netflix Materials, You represent
+              and warrant that You have the power and authority to enter into
+              this Agreement and to perform any obligations hereunder, and that
+              this Agreement shall constitute valid and binding obligations of
+              You enforceable in accordance with its terms.\r
+
+              \r
+
+              You hereby agree to indemnify, hold harmless, and
+              defend Netflix, its parent, subsidiary, and affiliated companies,
+              and each of their respective members, officers, directors, agents,
+              employees, successors, and assigns from and against any and all
+              claims, demands, losses, suits, actions, judgments, costs, and
+              expenses (including, without limitation, reasonable attorneys'
+              fees) arising out of or in connection with Your use of the Netflix
+              Materials and/or any breach or alleged breach by You of any of the
+              representations, warranties, and/or agreements made by You
+              hereunder. You hereby acknowledge and agree that Your rights and
+              remedies in connection with this Agreement or otherwise, shall be
+              limited to the right, if any, to seek damages at law, and You
+              shall have no right in any event (and do hereby waive all such
+              rights, if any) to seek to enjoin or restrain the production,
+              marketing, advertising, distribution or exhibition of any
+              productions of Netflix.\r
+
+              \r
+
+              If any claim is brought by a third party for which a
+              claim of indemnification is or may be provided hereunder, You
+              shall provide prompt written notice to Netflix. In such instance,
+              Netflix shall have the right to control the defense and/or
+              settlement of any claim provided that the parties cooperate
+              reasonably with each other in the defense of any claim, including
+              making available (under seal if desired, and if allowed) all
+              records reasonably necessary to the defense of such claim, and You
+              shall have the right to join and participate (through Your own
+              counsel and at Your own expense) actively in Netflix's defense of
+              the claim.\r
+
+              \r
+
+              The terms of this Agreement, and Your exercise of
+              the rights evidenced hereby, are at all times subject to the terms
+              of this Agreement. In the event of a conflict between the terms of
+              this Agreement and any Netflix Partner Marketing Agreement or
+              other Netflix Partner Agreement between You and Netflix (\"Partner
+              Agreement\"), the terms of the Partner Agreement shall control,
+              unless the parties agree in writing that they intend this
+              Agreement or any provisions herein to supersede or modify any
+              Partner Agreement or provisions therein.\r
+
+              \r
+
+              Access and use of the Netflix Materials is granted
+              conditioned on Your agreement to the terms set forth herein as if
+              You have signed Your Agreement.\r\n"
+          outgoingConnections:
+            - output->"Compare Base" res_6e3Yqw_194ZXACm2K/SUMMARY
+            - output->"Compare with Fine-tuned" F7SqOzQNes05DPibdL73n/ORIGINAL
+            - output->"Prompt" FR4hHSZj5VANRp5QoofGd/tos_text
+          visualData: -416.13846946734196/46.64036572460358/330/147//
+        '[LIuW9SBV15ZND12eVTc1E]:extractObjectPath "Meaning Change"':
+          data:
+            path: $.meaning_changes
+            usePathInput: false
+          outgoingConnections:
+            - match->"Text" 0wX3AXDemghY-1K-1dVPE/changes2
+          visualData: 3056.5755075958573/698.3186146376902/280/211//
+        '[Nf4Te3Svg-silu6vPCjhH]:extractObjectPath "Faithfulness Score"':
+          data:
+            path: $.faithfulness_score
+            usePathInput: false
+          outgoingConnections:
+            - match->"Text" 0wX3AXDemghY-1K-1dVPE/score1
+          visualData: 3040.9298348975894/-138.41528640015417/280/193//
+        '[PEE2g4gLaHNdMRJEvQJgs]:extractJson "Extract JSON"':
+          outgoingConnections:
+            - output->"Faithfulness Score" Nf4Te3Svg-silu6vPCjhH/object
+            - output->"Meaning Change" mmRZ0t08vGcu8o63f7wBT/object
+            - output->"Unsupported Claims" AdeqKMQk8grOuqBV1C7P2/object
+          visualData: 2643.749399498135/-89.07892790924305/280/205//
+        '[YP-O8b772r3y6pKOyGdqd]:extractObjectPath "Unsupported Claims"':
+          data:
+            path: $.unsupported_claims
+            usePathInput: false
+          outgoingConnections:
+            - match->"Text" 0wX3AXDemghY-1K-1dVPE/claims2
+          visualData: 3051.724433412049/485.9257274128637/280/212//
+        '[cIit3EOWaQJbCcgX6gMO-]:extractRegex "Extract Regex"':
+          data:
+            errorOnFailed: false
+            regex: (\{[\s\S]*\})
+            useRegexInput: false
+          outgoingConnections:
+            - matches->"Array" FjlTa6CYYDbpDUv-9uJtY/input1
+          visualData: 1878.0675116233301/-129.38590046566046/280/176//
+        '[fezvqAyGuyJFmTXctDnuM]:comment "Comment"':
+          data:
+            backgroundColor: rgba(247,0,0,0.05)
+            color: rgba(222,29,4,1)
+            height: 160.41914227863163
+            text: "### 01: Context Ingestion"
+          visualData: -500.4065577928694/-195.61266043789755/465.6303894243406/160//
+        '[ipJK8W-IK0YvuoMiDjakr]:extractJson "Extract JSON"':
+          outgoingConnections:
+            - output->"Faithfulness Score" 8x2JDmKdXmIy0LGEVaBEW/object
+            - output->"Meaning Change" LIuW9SBV15ZND12eVTc1E/object
+            - output->"Unsupported Claims" YP-O8b772r3y6pKOyGdqd/object
+          visualData: 2674.8647181314936/373.4843098369923/280/203//
+        '[mmRZ0t08vGcu8o63f7wBT]:extractObjectPath "Meaning Change"':
+          data:
+            path: $.meaning_changes
+            usePathInput: false
+          outgoingConnections:
+            - match->"Text" 0wX3AXDemghY-1K-1dVPE/changes1
+          visualData: 3055.6312818098136/269.3878875893244/280/213//
+        '[res_6e3Yqw_194ZXACm2K]:text "Compare Base"':
+          data:
+            normalizeLineEndings: true
+            text: "You are a Legal Compliance Reviewer. Compare SUMMARY vs ORIGINAL.\r
+
+              Rules:\r
+
+              1. Penalize ONLY: Contradictions, unsupported
+              claims, or meaning changes (e.g., \"may\" to \"must\").\r
+
+              2. Omissions are NOT errors unless the summary
+              claims to be exhaustive.\r
+
+              3. Scoring: 1.0 (perfect) to 0.0 (materially
+              wrong).\r
+
+              \r
+
+              Output ONLY raw JSON:\r
+
+              {\r
+
+              \  \"hallucinations\": boolean,\r
+
+              \  \"unsupported_claims\": [\"string\"],\r
+
+              \  \"meaning_changes\": [\"string\"],\r
+
+              \  \"faithfulness_score\": float\r
+
+              }\r
+
+              \r
+
+              Original Terms of Service:\r
+
+              {{ORIGINAL}}\r
+
+              \r
+
+              Generated Summary:\r
+
+              {{SUMMARY}}"
+          isConditional: false
+          outgoingConnections:
+            - output->"Chat" uu4KRTyHzd-Qjttnx3CUN/prompt
+          visualData: 1002.2839440026505/-262.891080495517/330/129//
+        '[rqhX_7pF6xelxOlUMLMb5]:comment "Comment"':
+          data:
+            backgroundColor: rgba(231,3,3,0.05)
+            color: rgba(238,3,3,1)
+            height: 105.31953538950034
+            text: "### Llama 3.3 Judge"
+          visualData: 1393.2259238194824/-278.7627286517525/488.8663804137193/165//
+        '[uu4KRTyHzd-Qjttnx3CUN]:chat "Chat"':
+          data:
+            additionalParameters: []
+            cache: false
+            enableFunctionUse: false
+            endpoint: https://api.groq.com/openai/v1/chat/completions
+            headers: []
+            maxTokens: 1024
+            modalitiesIncludeAudio: false
+            modalitiesIncludeText: false
+            model: gpt-5
+            outputUsage: false
+            overrideModel: llama-3.3-70b-versatile
+            parallelFunctionCalling: true
+            reasoningEffort: ""
+            stop: ""
+            temperature: 0.1
+            top_p: 1
+            useAdditionalParametersInput: false
+            useAsGraphPartialOutput: true
+            useFrequencyPenaltyInput: false
+            useMaxTokensInput: false
+            useModelInput: false
+            usePredictedOutput: false
+            usePresencePenaltyInput: false
+            useReasoningEffortInput: false
+            useServerTokenCalculation: true
+            useStop: false
+            useStopInput: false
+            useTemperatureInput: false
+            useTopP: false
+            useTopPInput: false
+            useUseTopPInput: false
+            useUserInput: false
+          outgoingConnections:
+            - response->"Extract Regex" cIit3EOWaQJbCcgX6gMO-/input
+          visualData: 1497.746019291901/-124.87854214806205/230/208//
+        '[vWtEHV0OR9tNEOweHdTfa]:extractRegex "Extract Regex"':
+          data:
+            errorOnFailed: false
+            regex: (\{[\s\S]*\})
+            text: ""
+            useRegexInput: false
+          outgoingConnections:
+            - matches->"Array" 9alzOEraLZIuIYk4Jwhds/input1
+          visualData: 1895.2406970969027/348.1707397734125/280/145//
+    zIY80Q9ySzEZWOFoDgYx-:
+      metadata:
+        description: ""
+        id: zIY80Q9ySzEZWOFoDgYx-
+        name: Untitled Graph
+      nodes: {}
+  metadata:
+    description: ""
+    id: ccshlWcICNwvUbN2MX25R
+    title: TOS
+  plugins:
+    - id: openai
+      name: OpenAI
+      type: built-in
+    - id: rivet-plugin-ollama@latest
+      package: rivet-plugin-ollama
+      tag: latest
+      type: package
+  references: []
