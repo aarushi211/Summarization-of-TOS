@@ -8,13 +8,13 @@
 
 ## 🚀 Project Overview
 
-**TOS-Summarizer** is a high-fidelity, dual-path AI system designed to solve the "Too Long; Didn't Read" problem of legal documents. By combining **Knowledge Distillation** with a **Dual-Path RAG architecture**, it distills 100+ page Terms of Service into actionable insights on low-cost, serverless infrastructure.
+**TOS-Summarizer** is a high-fidelity, dual-path AI system designed to solve the "Too Long; Didn't Read" problem of legal documents. By combining **Model Distillation & Style Transfer** with a **Dual-Path RAG architecture**, it distills 100+ page Terms of Service into actionable insights on low-cost, serverless infrastructure.
 
 | Feature | Technical Solution | Impact |
 | :--- | :--- | :--- |
 | **Context Length** | **Head-Middle-Tail Sampling** | Captures global context (18k+ tokens) without "Lost-in-the-Middle" bias. |
 | **High Precision** | **Dense RAG Path** | Uses FAISS + Cross-Encoder reranking for grounded, evidence-based Q&A. |
-| **Model Efficiency** | **Knowledge Distillation** | Distilled Llama 3.1 8B logic into a lightweight **Qwen 2.5 1.5B** student. |
+| **Model Efficiency** | **Model Distillation & Style Transferx** | Distilled Llama 3.1 8B logic into a lightweight **Qwen 2.5 1.5B** student. |
 | **Edge-Ready** | **4-bit GGUF Quantization** | Optimized for fast, CPU-only inference on **Google Cloud Run**. |
 | **Scalability** | **Scale-to-Zero Docker** | Fully containerized architecture with zero idle-compute costs. |
 
@@ -22,14 +22,14 @@
 The system utilizes a **Dual-Path Inference** design to ensure both high-level executive summaries and pinpoint clause-level precision.
 
 ### 1. Dual-Path Inference Pipeline
-* **Path A: Global Summarization**
+* **Global Context Path: Global Summarization**
     * **Strategy:** Implements **"Head-Middle-Tail" Sampling** (6k characters per segment) to extract 18k tokens of global context, effectively bypassing the "lost-in-the-middle" phenomenon in long legal docs.
-* **Path B: Targeted RAG (Q&A)**
+* **Atomic Retrieval Path: Targeted RAG (Q&A)**
     * **Retrieval:** **FAISS** vector store with **Maximal Marginal Relevance (MMR)** to ensure chunk diversity.
     * **Reranking:** Integrated **Cross-Encoder Reranking** to ensure the most legally salient evidence is prioritized for the LLM.
 
 ### 2. MLOps & Optimization
-* **Knowledge Distillation:** Fine-tuned a **Qwen 2.5 1.5B (Student)** using **Llama 3.1 8B (Teacher)** to retain complex reasoning within a 1GB footprint.
+* **Model Distillation & Style Transfer:** Fine-tuned a **Qwen 2.5 1.5B (Student)** using **Llama 3.1 8B (Teacher)** to retain complex reasoning within a 1GB footprint.
 * **Quantization:** Converted to **4-bit GGUF** via `llama.cpp`, enabling sub-second inference on standard CPU-only environments.
 * **Cloud Infrastructure:** Fully containerized with **Docker** and deployed on **Google Cloud Run**, utilizing scale-to-zero logic for maximum cost-efficiency.
 
@@ -50,7 +50,7 @@ To overcome the scarcity of high-quality legal datasets, I built a **Teacher-Stu
 * **Teacher Model:** **Llama 3.1 8B Instruct** served via **vLLM (PagedAttention)** on an NVIDIA T4 GPU.
 * **Outcome:** Generated **9,000+ grounded summaries**, mapping dense legal clauses to abstractive executive summaries.
 
-### Phase 2: Knowledge Distillation & SFT
+### Phase 2: Model Distillation & SFT
 I transitioned from the 8B teacher to an edge-friendly student model via **Supervised Fine-Tuning (SFT)**.
 * **Student Model:** **Qwen 2.5 1.5B**.
 * **Training Technique:** **QLoRA (4-bit)** to maximize parameter efficiency.
@@ -64,7 +64,7 @@ Final optimization aimed for zero-cost idle time and CPU-only execution.
 
 ## 📊 Evaluation & Analysis
 
-The model was validated against a held-out test set from the synthetic corpus. Given the zero-tolerance for hallucinations in the legal domain, the evaluation focused on **Faithfulness** and **Semantic Integrity**.
+While the model achieved high scores in semantic consistency, I implemented a custom observability pipeline to stress-test its factual grounding.
 
 ### Performance Metrics
 | Metric | Score | Insight |
@@ -73,6 +73,12 @@ The model was validated against a held-out test set from the synthetic corpus. G
 | **BERTScore** | **0.701** | Demonstrates strong semantic consistency post-quantization. |
 | **ROUGE-L** | **0.310** | High lexical overlap with critical legal terminology. |
 | **BLEU** | **0.151** | Respectable n-gram precision for a 1.5B parameter student model. |
+
+>**🔍 Discovery: Prompt-Induced Stability & Interface Drift** <br>
+During the evaluation phase using Rivet, I initially identified a performance gap that I attributed to Knowledge Distillation (the "Boilerplate Drift"). However, a deep-dive into the model's behavior revealed a more nuanced engineering lesson:
+>- **The Problem:** High-complexity prompts were "over-steering" the 1.5B student model, causing it to fall back on its pre-trained "legal tropes" (memorized boilerplate) to satisfy the high instruction overhead.
+>- **The Engineering Solution:** By Simplifying the Prompt Architecture and aligning the Ollama Modelfile specifically with the model’s native ChatML template, I achieved a stable, factual state without any "Boilerplate Drift."
+>- **Key Insight:** For edge-deployed LLMs (1.5B–3B parameters), prompt-to-parameter ratio is critical. A simplified, direct prompt allowed the model to focus its limited attention on the 18k tokens of retrieved context rather than parsing complex system instructions.
 
 ### Model Selection Trade-off
 | Model | Size | Rationale |
