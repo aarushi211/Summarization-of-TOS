@@ -1,6 +1,6 @@
 # 📜 TOS-Summarizer: Distilled Legal AI
 
-![Python](https://img.shields.io/badge/Python-3.9-blue)
+![Python](https://img.shields.io/badge/Python-3.11-blue)
 ![Docker](https://img.shields.io/badge/Docker-Containerized-2496ED)
 ![LlamaCPP](https://img.shields.io/badge/Llama_CPP-Quantized-orange)
 ![FAISS](https://img.shields.io/badge/Vector_DB-FAISS-yellow)
@@ -114,9 +114,17 @@ Deploying LLMs to serverless infrastructure presents unique challenges regarding
 👉 **[Read the full Deployment Engineering Guide](DEPLOYMENT.md)** to see how I solved Docker build timeouts and optimized inference for CPU-only environments.
 
 ## 🔮 Future Work & Scalability
-While the current MVP demonstrates a successful distillation and deployment pipeline, the following enhancements are planned to move toward production-grade legal AI:
+While the current MVP demonstrates a successful distillation and deployment pipeline, the following enhancements are planned to move from a research prototype toward a production-grade legal AI service:
 
-* **Hybrid Retrieval Engine:** Integration of **BM25 (Sparse Search)** alongside FAISS to improve recall for specific legal terminology and exact phrase matching.
-* **Recursive Sectional Summarization:** Moving beyond "Head-Middle-Tail" sampling toward a hierarchical summarization approach to ensure 100% clause coverage.
-* **RAGAS Benchmarking:** Implementing the **RAGAS framework** to provide automated, multi-dimensional evaluation of retrieval precision and context utilization.
+**1. Production Engineering & Security (Short Term):**
+* **Stateless API Transition:** Decoupling the Streamlit frontend from the RAG engine by implementing a FastAPI backend. This will enable proper session management and horizontal scaling.
+* **Multi-Tenancy & Data Isolation:** Implementing UUID-based session state and partitioned storage within the Cloud Run Volume Mounts to ensure 100% data isolation between concurrent users.
+* **Request Sandboxing:** Enhancing the URL ingestion layer with a validation proxy to mitigate SSRF risks and sanitize scraped HTML content.
+
+**2. Algorithmic Enhancements (Mid Term):**
+* **Hybrid Retrieval Engine:** Integration of BM25 (Sparse Search) alongside FAISS to improve recall for specific legal terminology and exact phrase matching.
+* **Recursive Sectional Summarization:** Moving beyond "Head-Middle-Tail" sampling toward a hierarchical summarization approach to ensure 100% clause coverage for documents exceeding 50+ pages.
+
+**3. Evaluation & Compliance (Long Term):**
+* **RAGAS Benchmarking:** Implementing the RAGAS framework to provide automated, multi-dimensional evaluation of retrieval precision, faithfulness, and context utilization.
 * **Jurisdictional Context Injection:** Incorporating metadata filters to adjust analysis based on regional laws (e.g., GDPR vs. CCPA).
