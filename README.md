@@ -14,8 +14,8 @@
 | :--- | :--- | :--- |
 | **Context Length** | **Head-Middle-Tail Sampling** | Captures global context (18k+ tokens) without "Lost-in-the-Middle" bias. |
 | **High Precision** | **Dense RAG Path** | Uses FAISS + Cross-Encoder reranking for grounded, evidence-based Q&A. |
-| **Model Efficiency** | **Model Distillation & Style Transferx** | Distilled Llama 3.1 8B logic into a lightweight **Qwen 2.5 1.5B** student. |
-| **Edge-Ready** | **4-bit GGUF Quantization** | Optimized for fast, CPU-only inference on **Google Cloud Run**. |
+| **Model Efficiency** | **Model Distillation & Style Transfer** | Distilled Llama 3.1 8B logic into a lightweight **Qwen 2.5 1.5B** student. |
+| **Edge-Ready** | **4-bit GGUF Quantization** | ~7.5 tok/s throughput on CPU-only inference; **2.3s cold start**. |
 | **Scalability** | **Scale-to-Zero Docker** | Fully containerized architecture with zero idle-compute costs. |
 
 ## 🏗️ System Architecture & Key Contributions
@@ -66,7 +66,7 @@ Final optimization aimed for zero-cost idle time and CPU-only execution.
 
 While the model achieved high scores in semantic consistency, I implemented a custom observability pipeline to stress-test its factual grounding.
 
-### Performance Metrics
+### Quality Metrics
 | Metric | Score | Insight |
 | :--- | :--- | :--- |
 | **Faithfulness** | **0.945** | Verified via LLM-as-a-Judge; confirms high grounding in source text. |
@@ -74,17 +74,30 @@ While the model achieved high scores in semantic consistency, I implemented a cu
 | **ROUGE-L** | **0.310** | High lexical overlap with critical legal terminology. |
 | **BLEU** | **0.151** | Respectable n-gram precision for a 1.5B parameter student model. |
 
+### Latency & Throughput Benchmarks
+Benchmarked end-to-end across **5 legal documents** (6–45 pages) and **29 Q&A queries** on a local machine (Windows 11, CPU-only, 4-bit GGUF).
+
+| Pipeline Stage | Avg Latency | Key Detail |
+| :--- | :--- | :--- |
+| **Cold Start** (model + embeddings + reranker) | **2.31s** | GGUF load: 1.71s, Embeddings: 0.41s, Cross-Encoder: 0.19s |
+| **Document Ingestion** | **4.48s** | PDF parse: 2.58s, FAISS indexing: 1.88s (scales with chunk count) |
+| **Global Summarization** | **44.10s** | 7.5 tok/s; ~3,871 prompt tokens → ~337 completion tokens |
+| **Q&A Inference** (avg) | **12.74s** | Retrieval: 1.37s, LLM generation: 11.37s at 5.8 tok/s |
+| **Q&A Inference** (P95) | **16.62s** | Worst-case tail latency across 29 queries |
+
+> **🔍 Retrieval Bottleneck Analysis:** MMR search is fast (63ms avg), but **Cross-Encoder reranking dominates retrieval** at 1.31s (95% of retrieval time). For latency-sensitive deployments, reducing `fetch_k` or switching to a lighter reranker would yield the highest improvement.
+
 >**🔍 Discovery: Prompt-Induced Stability & Interface Drift** <br>
 During the evaluation phase using Rivet, I initially identified a performance gap that I attributed to Knowledge Distillation (the "Boilerplate Drift"). However, a deep-dive into the model's behavior revealed a more nuanced engineering lesson:
 >- **The Problem:** High-complexity prompts were "over-steering" the 1.5B student model, causing it to fall back on its pre-trained "legal tropes" (memorized boilerplate) to satisfy the high instruction overhead.
->- **The Engineering Solution:** By Simplifying the Prompt Architecture and aligning the Ollama Modelfile specifically with the model’s native ChatML template, I achieved a stable, factual state without any "Boilerplate Drift."
+>- **The Engineering Solution:** By Simplifying the Prompt Architecture and aligning the Ollama Modelfile specifically with the model's native ChatML template, I achieved a stable, factual state without any "Boilerplate Drift."
 >- **Key Insight:** For edge-deployed LLMs (1.5B–3B parameters), prompt-to-parameter ratio is critical. A simplified, direct prompt allowed the model to focus its limited attention on the 18k tokens of retrieved context rather than parsing complex system instructions.
 
 ### Model Selection Trade-off
-| Model | Size | Rationale |
-| :--- | :--- | :--- |
-| **Qwen 2.5 1.5B** | **~1 GB** | **Production Choice:** Selected for cost-sensitive, scale-to-zero serverless environments with high clause recall. |
-| **Mistral 7B** | ~7.5 GB | **High-Fidelity Choice:** Better for high-risk interpretation where latency/cost are secondary. |
+| Model | Size | Throughput | Rationale |
+| :--- | :--- | :--- | :--- |
+| **Qwen 2.5 1.5B** | **~1 GB** | **~7.5 tok/s** | **Production Choice:** Selected for cost-sensitive, scale-to-zero serverless environments with high clause recall. |
+| **Mistral 7B** | ~7.5 GB | — | **High-Fidelity Choice:** Better for high-risk interpretation where latency/cost are secondary. |
 
 > **Limitations:** Evaluation is based on synthetic teacher summaries; jurisdiction-specific legal nuances are not explicitly modeled.
 
