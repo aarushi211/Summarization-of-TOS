@@ -207,6 +207,19 @@ def run_benchmark():
         summary_metrics = [m for m in rag.get_metrics() if m.get("stage") == "global_summary"]
         if summary_metrics:
             sm = summary_metrics[-1]
+
+            if "topics" in sm and sm["topics"]:
+                total_llm_s = sum(t.get("llm_inference_s", 0) for t in sm["topics"])
+                total_prompt = sum(t.get("prompt_tokens", 0) for t in sm["topics"])
+                total_comp = sum(t.get("completion_tokens", 0) for t in sm["topics"])
+                sm["llm_inference_s"] = total_llm_s
+                sm["prompt_tokens"] = total_prompt
+                sm["completion_tokens"] = total_comp
+                if total_llm_s > 0:
+                    sm["tokens_per_sec"] = total_comp / total_llm_s
+                else:
+                    sm["tokens_per_sec"] = 0
+
             print_metric("Global Summary Total", format_time(sm.get("total_summary_s", 0)), indent=1)
             print_metric("LLM Inference", format_time(sm.get("llm_inference_s", 0)), indent=2)
             tok_sec = sm.get("tokens_per_sec", 0)

@@ -1,306 +1,671 @@
+import logging
+import os
+
+# Suppress transformers logging
+from transformers.utils import logging as transformers_logging
+transformers_logging.set_verbosity_error()
+
+# Optional: Suppress general Windows/Library warnings
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning)
+
 from pathlib import Path
-from langchain_community.document_loaders import PyPDFLoader
-from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_community.document_loaders import PyPDFLoader, TextLoader
+from langchain_text_splitters import MarkdownHeaderTextSplitter, RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
+from langchain_community.retrievers import BM25Retriever
+from langchain_core.documents import Document
 from llama_cpp import Llama
 from sentence_transformers import CrossEncoder
 import re
 import time
-from langchain_community.document_loaders import TextLoader
+from langsmith import traceable
+
+
+# ---------------------------------------------------------------------------
+# Topics the RAG-based summariser retrieves chunks for.
+# Each entry: (display_label, retrieval_query)
+# ---------------------------------------------------------------------------
+SUMMARY_TOPICS = [
+    ("Data Collection",         "what personal data and information is collected from users"),
+    ("Data Sharing / Selling",  "sharing selling transferring user data to third parties partners"),
+    ("Data Retention & Deletion","data retention period deletion of user account and personal data"),
+    ("User Rights",             "user rights account termination suspension appeals"),
+    ("Refund & Cancellation",   "refund cancellation subscription termination policy"),
+    ("Arbitration & Disputes",  "arbitration dispute resolution class action waiver"),
+    ("Liability Limitations",   "limitation of liability damages indemnification"),
+    ("IP & Content Ownership",  "intellectual property content ownership license user generated"),
+    ("Policy Changes",          "changes to terms notice modification policy updates"),
+    ("Governing Law",           "governing law jurisdiction venue applicable law"),
+    ("Children & COPPA",        "children under 13 COPPA minors privacy"),
+    ("Cookies & Tracking",      "cookies tracking pixels analytics advertising identifiers"),
+]
+
 
 class TOSAssistant:
     def __init__(self, model_path, index_dir="faiss_index"):
         self.index_dir = Path(index_dir)
-        self._metrics = []
+        self._metrics  = []
 
-        # --- Time GGUF Model Load ---
+        # ── GGUF Model ──────────────────────────────────────────────────────
         print(f"Loading RAG Model: {Path(model_path).name}")
         t0 = time.perf_counter()
         self.llm = Llama(
             model_path=model_path,
             n_ctx=8192,
             n_gpu_layers=-1,
-            verbose=False
+            verbose=False,
         )
-        t_model = time.perf_counter() - t0
-        self._metrics.append({"stage": "init", "sub_stage": "gguf_model_load", "latency_s": t_model})
+        self._metrics.append({
+            "stage": "init", "sub_stage": "gguf_model_load",
+            "latency_s": time.perf_counter() - t0,
+        })
 
-        SCRIPT_DIR = Path(__file__).resolve().parent
+        SCRIPT_DIR   = Path(__file__).resolve().parent
         PROJECT_ROOT = SCRIPT_DIR.parent.parent
-        local_embed_path = PROJECT_ROOT / "models" / "embeddings"
-        local_cross_path = PROJECT_ROOT / "models" / "cross-encoder" / "ms-marco-MiniLM-L-6-v2"
+        local_embed  = PROJECT_ROOT / "models" / "embeddings"
+        local_cross  = PROJECT_ROOT / "models" / "cross-encoder" / "ms-marco-MiniLM-L-6-v2"
 
-        # --- Time Embedding Model Load ---
+        # ── Embedding Model ──────────────────────────────────────────────────
         print("Loading Embeddings & Cross-Encoder...")
         t0 = time.perf_counter()
         self.embed_model = HuggingFaceEmbeddings(
-            model_name=str(local_embed_path),
-            model_kwargs={"trust_remote_code": True}
+            model_name=str(local_embed),
+            model_kwargs={"trust_remote_code": True},
         )
-        t_embed = time.perf_counter() - t0
-        self._metrics.append({"stage": "init", "sub_stage": "embedding_load", "latency_s": t_embed})
+        self._metrics.append({
+            "stage": "init", "sub_stage": "embedding_load",
+            "latency_s": time.perf_counter() - t0,
+        })
 
-        # --- Time Cross-Encoder Load ---
+        # ── Cross-Encoder ────────────────────────────────────────────────────
         t0 = time.perf_counter()
-        self.cross_encoder = CrossEncoder(str(local_cross_path))
-        t_cross = time.perf_counter() - t0
-        self._metrics.append({"stage": "init", "sub_stage": "cross_encoder_load", "latency_s": t_cross})
+        self.cross_encoder = CrossEncoder(str(local_cross))
+        self._metrics.append({
+            "stage": "init", "sub_stage": "cross_encoder_load",
+            "latency_s": time.perf_counter() - t0,
+        })
 
-        total_init = t_model + t_embed + t_cross
-        self._metrics.append({"stage": "init", "sub_stage": "total", "latency_s": total_init})
+        # ── Splitters (built once, reused across ingestions) ─────────────────
+        # Stage 1: structural split by Markdown headers produced by pre-processor
+        self.header_splitter = MarkdownHeaderTextSplitter(
+            headers_to_split_on=[
+                ("#",    "doc_title"),
+                ("##",   "section"),
+                ("###",  "subsection"),
+                ("####", "clause"),
+            ],
+            strip_headers=False,   # keep header text in chunk body for context
+        )
+        # Stage 2: sub-split long sections, respecting sentence boundaries
+        self.sub_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=3500,        # ~875 tokens at 4 chars/token
+            chunk_overlap=700,      # ~175 tokens of genuine overlap
+            separators=["\n\n", "\n", ". ", " ", ""],
+        )
 
-        self.vector_store = None
-        self.full_text = ""
-        self.doc_type = "Unkown Document"
+        # ── Runtime state ────────────────────────────────────────────────────
+        self.vector_store:   FAISS | None         = None
+        self.bm25_retriever: BM25Retriever | None = None
+        self.all_chunks:     list[Document]       = []
+        self.full_text   = ""
+        self.doc_type    = "Unknown Document"
         self.service_name = "Unknown Service"
 
-    def clean_text(self, text):
-        replacements = {
-            "\u00ef\u00ac\u0081": "fi",
-            "\u00ef\u00ac\u0082": "fl",
-            "\u00ef\u00ac\u0080": "ff",
-            "\u00ef\u00ac\u0083": "ffi",
-            "\u00ef\u00ac\u0084": "ffl", 
-            "": "",}
-        
-        for search, replace in replacements.items():
-            text = text.replace(search, replace)
+    # =========================================================================
+    # Pre-processing: raw text → structured Markdown
+    # =========================================================================
 
-        text = re.sub(r'\s+', ' ', text).strip()
-        
-        return text
+    # Compiled header-detection patterns
+    _RE_PAGE       = re.compile(r'^---\s*PAGE\s+(\d+)\s*---$', re.IGNORECASE)
+    _RE_SOURCE_TAG = re.compile(r'<source_id>(.+?)</source_id>')
+    _RE_DEEP       = re.compile(r'^(\d+\.\d+\.\d+)\s+([A-Z].+)$')              # 1.2.3 Header
+    _RE_SUB        = re.compile(r'^(\d+\.\d+)\s+([A-Z][^\n]{2,})$')            # 1.2 Header
+    _RE_TOP        = re.compile(r'^(\d+)\.\s+([A-Z][^\n]{3,})$')               # 1. Header
+    _RE_LETTERED   = re.compile(r'^\(([a-z])\)\s+([A-Z].+)$')                  # (a) Sub-clause
+    _RE_ARTICLE    = re.compile(r'^(Article\s+[IVXLCDM\d]+)[:\.\s]*(.*)',       re.IGNORECASE)
+    _RE_SECTION_KW = re.compile(r'^(Section\s+\d+(?:\.\d+)*)[:\.\s]*(.*)',      re.IGNORECASE)
+    _RE_APPENDIX   = re.compile(r'^(Appendix\s+[A-Z\d])[:\.\s]*(.*)',           re.IGNORECASE)
+    _RE_SYMBOL     = re.compile(r'^(§\s*\d+(?:\.\d+)*)\s+(.*)')                # § 5 Disputes
+    _RE_ALLCAPS    = re.compile(r'^([A-Z][A-Z\s\-\&\/]{4,})(?::|\.|\s*$)')     # ALL CAPS HEADER
+    _RE_TITLE_CASE = re.compile(                                                # How We Use Your Data
+        r'^((?:[A-Z][a-z]+\s){2,6}(?:[A-Z][a-z]+))(?::|$)'
+    )
 
-    def ingest_document(self, pdf_path):
-        print(f'Ingesting {pdf_path}...')
-        metrics_entry = {"stage": "ingest_document", "document": str(pdf_path)}
+    def _convert_to_markdown(self, raw_text: str) -> str:
+        """
+        Convert raw TOS text into structured Markdown so MarkdownHeaderTextSplitter
+        can split on true document boundaries.
 
-        # --- PDF Parsing ---
-        t0 = time.perf_counter()
-        loader = PyPDFLoader(pdf_path)
-        documents = loader.load()
-        metrics_entry["pdf_parse_s"] = time.perf_counter() - t0
-        metrics_entry["page_count"] = len(documents)
+        Rules
+        -----
+        - Page markers  → HTML comments <!-- page:N -->  (harvested post-split,
+                          invisible to the header splitter)
+        - Source tags   → preserved as-is, harvested post-split
+        - Section lines → normalised to ##/###/#### Markdown headings
+        - Everything else → left unchanged
+        """
+        output: list[str] = []
 
-        # --- Text Cleaning ---
-        t0 = time.perf_counter()
-        cleaned_pages = []
+        for line in raw_text.split('\n'):
+            stripped = line.strip()
+
+            # Page markers ────────────────────────────────────────────────────
+            m = self._RE_PAGE.match(stripped)
+            if m:
+                output.append(f'<!-- page:{m.group(1)} -->')
+                continue
+
+            # Source-ID tags (preserve, harvest later) ────────────────────────
+            if self._RE_SOURCE_TAG.search(stripped):
+                output.append(stripped)
+                continue
+
+            # Multi-level numeric: 1.2.3 ──────────────────────────────────────
+            m = self._RE_DEEP.match(stripped)
+            if m:
+                output.append(f'#### {m.group(1)} {m.group(2)}')
+                continue
+
+            # Sub-section: 1.2 ────────────────────────────────────────────────
+            m = self._RE_SUB.match(stripped)
+            if m:
+                output.append(f'### {m.group(1)} {m.group(2)}')
+                continue
+
+            # Top-level numeric: 1. ───────────────────────────────────────────
+            m = self._RE_TOP.match(stripped)
+            if m:
+                output.append(f'## {m.group(1)}. {m.group(2)}')
+                continue
+
+            # Lettered sub-clause: (a) ────────────────────────────────────────
+            m = self._RE_LETTERED.match(stripped)
+            if m:
+                output.append(f'#### ({m.group(1)}) {m.group(2)}')
+                continue
+
+            # Keyword-based: Article / Section / Appendix / § ─────────────────
+            matched_keyword = False
+            for pattern, md_level in [
+                (self._RE_ARTICLE,    "##"),
+                (self._RE_SECTION_KW, "###"),
+                (self._RE_APPENDIX,   "##"),
+                (self._RE_SYMBOL,     "###"),
+            ]:
+                m = pattern.match(stripped)
+                if m:
+                    rest    = m.group(2).strip()
+                    heading = f"{m.group(1)}{': ' + rest if rest else ''}"
+                    output.append(f'{md_level} {heading}')
+                    matched_keyword = True
+                    break
+
+            if matched_keyword:
+                continue
+
+            # ALL-CAPS header (guard against all-caps paragraphs with len < 80) ─
+            m = self._RE_ALLCAPS.match(stripped)
+            if m and len(stripped) < 80:
+                output.append(f'## {m.group(1).strip()}')
+                continue
+
+            # Title-Case prose header ─────────────────────────────────────────
+            m = self._RE_TITLE_CASE.match(stripped)
+            if m and len(stripped) < 80:
+                output.append(f'### {m.group(1).strip()}')
+                continue
+
+            # Default: preserve original line ─────────────────────────────────
+            output.append(line)
+
+        return '\n'.join(output)
+
+    # =========================================================================
+    # Text cleaning (ligatures, whitespace normalisation)
+    # =========================================================================
+
+    _LIGATURE_MAP = {
+        "\u00ef\u00ac\u0081": "fi",
+        "\u00ef\u00ac\u0082": "fl",
+        "\u00ef\u00ac\u0080": "ff",
+        "\u00ef\u00ac\u0083": "ffi",
+        "\u00ef\u00ac\u0084": "ffl",
+        "\ufb01": "fi",
+        "\ufb02": "fl",
+        "": "",
+    }
+
+    def clean_text(self, text: str) -> str:
+        for bad, good in self._LIGATURE_MAP.items():
+            text = text.replace(bad, good)
+        text = re.sub(r'[ \t]+', ' ', text)        # collapse horizontal whitespace
+        text = re.sub(r'\n{3,}', '\n\n', text)     # max two consecutive newlines
+        return text.strip()
+
+    # =========================================================================
+    # Two-stage chunking with full metadata injection
+    # =========================================================================
+
+    def _build_chunks(self, documents: list[Document]) -> list[Document]:
+        """
+        Pipeline per Document:
+          1. Clean text
+          2. Convert to Markdown (normalise headers, embed <!-- page:N --> comments)
+          3. Stage-1: MarkdownHeaderTextSplitter  → section-scoped docs
+          4. Stage-2: RecursiveCharacterTextSplitter → RAG-sized chunks
+          5. Inject metadata: chunk_id, page, section, subsection, clause,
+             source_id_first/last, citation string
+        """
+        all_chunks: list[Document] = []
+        chunk_id = 0
+
         for doc in documents:
-            cleaned_content = self.clean_text(doc.page_content)
-            cleaned_pages.append(cleaned_content)
+            base_page = doc.metadata.get("page", 0)   # 0-indexed (PyPDFLoader)
+            md_text   = self._convert_to_markdown(self.clean_text(doc.page_content))
 
-        self.full_text = '\n'.join(cleaned_pages)
+            # Stage 1 — structural split
+            sections = self.header_splitter.split_text(md_text)
 
-        for doc, clean_text in zip(documents, cleaned_pages):
-            doc.page_content = clean_text
-        metrics_entry["text_clean_s"] = time.perf_counter() - t0
-        metrics_entry["total_chars"] = len(self.full_text)
+            for section in sections:
+                # Stage 2 — size split within the section
+                sub_chunks = self.sub_splitter.split_documents([section])
 
-        # --- Chunking ---
+                for chunk in sub_chunks:
+                    body = chunk.page_content
+
+                    # Harvest page number from embedded comment
+                    page_m    = re.search(r'<!--\s*page:(\d+)\s*-->', body)
+                    page_1idx = int(page_m.group(1)) if page_m else (base_page + 1)
+                    body      = re.sub(r'<!--.*?-->', '', body).strip()
+
+                    # Harvest & strip source_id tags
+                    source_ids = self._RE_SOURCE_TAG.findall(body)
+                    body       = self._RE_SOURCE_TAG.sub('', body).strip()
+
+                    chunk.page_content = body
+                    if not body:
+                        continue
+
+                    # Pull propagated header metadata from Stage 1
+                    section_title = chunk.metadata.get("section",    "General")
+                    subsection    = chunk.metadata.get("subsection", "")
+                    clause        = chunk.metadata.get("clause",     "")
+
+                    # Build human-readable citation string
+                    citation_parts = [f"p.{page_1idx}"]
+                    if section_title and section_title != "General":
+                        citation_parts.append(section_title)
+                    if subsection:
+                        citation_parts.append(subsection)
+                    if clause:
+                        citation_parts.append(clause)
+
+                    chunk.metadata.update({
+                        "chunk_id":        chunk_id,
+                        "page":            page_1idx - 1,   # 0-indexed internally
+                        "page_label":      f"p.{page_1idx}",
+                        "section":         section_title,
+                        "subsection":      subsection,
+                        "clause":          clause,
+                        "source_id_first": source_ids[0]  if source_ids else "",
+                        "source_id_last":  source_ids[-1] if source_ids else "",
+                        "citation":        " › ".join(citation_parts),
+                    })
+
+                    all_chunks.append(chunk)
+                    chunk_id += 1
+
+        return all_chunks
+
+    # =========================================================================
+    # Ingestion — PDF
+    # =========================================================================
+
+    def ingest_document(self, pdf_path: str):
+        print(f"Ingesting PDF: {pdf_path}")
+        m: dict = {"stage": "ingest_document", "document": str(pdf_path)}
+
         t0 = time.perf_counter()
-        text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=1200, 
-            chunk_overlap=300
-        )
-        chunks = text_splitter.split_documents(documents)
-        metrics_entry["chunking_s"] = time.perf_counter() - t0
-        metrics_entry["chunk_count"] = len(chunks)
-        
-        # --- FAISS Indexing ---
+        documents = PyPDFLoader(pdf_path).load()
+        m["pdf_parse_s"] = time.perf_counter() - t0
+        m["page_count"]  = len(documents)
+
+        t0 = time.perf_counter()
+        self.full_text = '\n'.join(self.clean_text(d.page_content) for d in documents)
+        m["text_clean_s"] = time.perf_counter() - t0
+        m["total_chars"]  = len(self.full_text)
+
+        self._index_chunks(documents, m)
+        print("PDF ingestion complete.")
+
+    # =========================================================================
+    # Ingestion — plain text / scraped URL
+    # =========================================================================
+
+    def ingest_text_file(self, txt_path: str):
+        print(f"Ingesting text file: {txt_path}")
+        m: dict = {"stage": "ingest_text", "document": str(txt_path)}
+
+        t0 = time.perf_counter()
+        documents = TextLoader(txt_path, encoding='utf-8').load()
+        m["text_load_s"] = time.perf_counter() - t0
+
+        for doc in documents:
+            doc.metadata.setdefault("page", 0)   # no real pages in scraped text
+
+        self.full_text  = self.clean_text(documents[0].page_content)
+        m["total_chars"] = len(self.full_text)
+
+        self._index_chunks(documents, m)
+        print("Text ingestion complete.")
+
+    # =========================================================================
+    # Shared indexing logic
+    # =========================================================================
+
+    def _index_chunks(self, documents: list[Document], metrics: dict):
+        t0 = time.perf_counter()
+        chunks          = self._build_chunks(documents)
+        self.all_chunks = chunks
+        metrics["chunking_s"]  = time.perf_counter() - t0
+        metrics["chunk_count"] = len(chunks)
+
+        if not chunks:
+            print("WARNING: No chunks produced — check document content.")
+            return
+
+        # FAISS (dense / semantic)
         t0 = time.perf_counter()
         self.vector_store = FAISS.from_documents(chunks, self.embed_model)
-        metrics_entry["faiss_index_s"] = time.perf_counter() - t0
+        metrics["faiss_index_s"] = time.perf_counter() - t0
 
-        metrics_entry["total_ingest_s"] = (
-            metrics_entry["pdf_parse_s"] + metrics_entry["text_clean_s"] +
-            metrics_entry["chunking_s"] + metrics_entry["faiss_index_s"]
+        # BM25 (sparse / lexical — critical for exact legal terminology)
+        t0 = time.perf_counter()
+        self.bm25_retriever   = BM25Retriever.from_documents(chunks)
+        self.bm25_retriever.k = 20
+        metrics["bm25_index_s"] = time.perf_counter() - t0
+
+        metrics["total_ingest_s"] = (
+            metrics.get("pdf_parse_s", 0) +
+            metrics.get("text_load_s", 0) +
+            metrics.get("text_clean_s", 0) +
+            metrics["chunking_s"] +
+            metrics["faiss_index_s"] +
+            metrics["bm25_index_s"]
         )
-        self._metrics.append(metrics_entry)
-        print("Ingestion complete. Vector Store Ready.")
+        self._metrics.append(metrics)
 
-    def ingest_text_file(self, txt_path):
-        print(f'Ingesting Text File {txt_path}...')
-        metrics_entry = {"stage": "ingest_text", "document": str(txt_path)}
+    # =========================================================================
+    # Retrieval — Hybrid BM25 + FAISS MMR → RRF → Cross-Encoder rerank
+    # =========================================================================
 
-        # --- Text Loading ---
+    @staticmethod
+    def _reciprocal_rank_fusion(*ranked_lists, k: int = 60) -> list[Document]:
+        scores:  dict[int, float]    = {}
+        doc_map: dict[int, Document] = {}
+        for ranked in ranked_lists:
+            for rank, doc in enumerate(ranked):
+                cid          = doc.metadata.get("chunk_id", id(doc))
+                scores[cid]  = scores.get(cid, 0.0) + 1.0 / (k + rank + 1)
+                doc_map[cid] = doc
+        return [doc_map[cid] for cid in sorted(scores, key=scores.__getitem__, reverse=True)]
+
+    @traceable(name="Hybrid Retrieval (FAISS + BM25)")
+    def _get_relevant_chunks(
+        self, query: str, top_k: int = 7
+    ) -> tuple[list[Document], dict]:
+        rm: dict = {}
+
+        # FAISS MMR — diverse semantic results
         t0 = time.perf_counter()
-        loader = TextLoader(txt_path, encoding='utf-8')
-        documents = loader.load()
-        metrics_entry["text_load_s"] = time.perf_counter() - t0
-        
-        # --- Chunking ---
-        t0 = time.perf_counter()
-        # Reuse your existing splitter logic
-        text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=1200, 
-            chunk_overlap=300
+        faiss_results = self.vector_store.max_marginal_relevance_search(
+            query, k=30, fetch_k=80, lambda_mult=0.5
         )
-        chunks = text_splitter.split_documents(documents)
-        metrics_entry["chunking_s"] = time.perf_counter() - t0
-        metrics_entry["chunk_count"] = len(chunks)
+        rm["mmr_search_s"]   = time.perf_counter() - t0
+        rm["mmr_candidates"] = len(faiss_results)
 
-        # --- FAISS Indexing ---
+        # BM25 — exact keyword match ("arbitration", "indemnify", "COPPA", …)
         t0 = time.perf_counter()
-        self.full_text = documents[0].page_content
-        self.vector_store = FAISS.from_documents(chunks, self.embed_model)
-        metrics_entry["faiss_index_s"] = time.perf_counter() - t0
+        bm25_results = self.bm25_retriever.invoke(query)
+        rm["bm25_search_s"]   = time.perf_counter() - t0
+        rm["bm25_candidates"] = len(bm25_results)
 
-        metrics_entry["total_chars"] = len(self.full_text)
-        metrics_entry["total_ingest_s"] = (
-            metrics_entry["text_load_s"] + metrics_entry["chunking_s"] +
-            metrics_entry["faiss_index_s"]
-        )
-        self._metrics.append(metrics_entry)
-        print("Text Ingestion complete.")
+        # Merge with RRF, cap pool before expensive reranking
+        candidates = self._reciprocal_rank_fusion(faiss_results, bm25_results)[:50]
 
-    def _get_relevant_chunks(self, query, top_k=5):
-        retrieval_metrics = {}
-
-        # --- MMR Search ---
+        # Cross-encoder rerank for precision
         t0 = time.perf_counter()
-        candidates = self.vector_store.max_marginal_relevance_search(
-            query, k=50, fetch_k=100, lambda_mult=0.5
-        )
-        retrieval_metrics["mmr_search_s"] = time.perf_counter() - t0
-        retrieval_metrics["mmr_candidates"] = len(candidates)
-
-        # --- Cross-Encoder Reranking ---
-        t0 = time.perf_counter()
-        pairs = [[query, doc.page_content] for doc in candidates]
+        pairs  = [[query, doc.page_content] for doc in candidates]
         scores = self.cross_encoder.predict(pairs)
-        scored_docs = sorted(zip(candidates, scores), key=lambda x: x[1], reverse=True)
-        retrieval_metrics["rerank_s"] = time.perf_counter() - t0
+        ranked = sorted(zip(candidates, scores), key=lambda x: x[1], reverse=True)
+        rm["rerank_s"] = time.perf_counter() - t0
 
-        retrieval_metrics["total_retrieval_s"] = (
-            retrieval_metrics["mmr_search_s"] + retrieval_metrics["rerank_s"]
-        )
+        rm["total_retrieval_s"] = rm["mmr_search_s"] + rm["bm25_search_s"] + rm["rerank_s"]
+        return [doc for doc, _ in ranked[:top_k]], rm
 
-        result = [doc for doc, score in scored_docs[:top_k]]
-        return result, retrieval_metrics
+    # =========================================================================
+    # LLM helpers
+    # =========================================================================
 
-    def format_qwen_prompt(self, system_msg, user_msg):
+    def format_qwen_prompt(self, system_msg: str, user_msg: str) -> str:
         return (
             f"<|im_start|>system\n{system_msg}<|im_end|>\n"
             f"<|im_start|>user\n{user_msg}<|im_end|>\n"
             f"<|im_start|>assistant\n"
         )
 
-    def generate_global_summary(self):
-        if not self.full_text:
-            return "No document loaded."
-
-        metrics_entry = {"stage": "global_summary"}
-
-        total_len = len(self.full_text)
-        samples = [
-            self.full_text[:6000],          
-            self.full_text[total_len//2-3000:total_len//2+3000],  
-            self.full_text[-6000:]           
-        ]
-        
-        truncated_text = "\n[...]\n".join(samples)
-        metrics_entry["input_chars"] = len(truncated_text)
-
-        system_prompt = "You are a legal expert. Summarize the following Terms of Service. Focus on user rights and data privacy."
-        
-        user_prompt = f"Service: {self.service_name}\nDoc Type: {self.doc_type}\n\nText:\n{truncated_text}"
-
-        # --- Prompt Construction ---
-        t0 = time.perf_counter()
-        formatted_prompt = self.format_qwen_prompt(system_prompt, user_prompt)
-        metrics_entry["prompt_construct_s"] = time.perf_counter() - t0
-
-        # --- LLM Inference ---
-        t0 = time.perf_counter()
-        output = self.llm(
-            formatted_prompt,
-            max_tokens=500,
-            temperature=0.1,
-            repeat_penalty=1.2,
-            stop=["<|im_end|>", "<|eot_id|>"],
-            echo=False
-        )
-        metrics_entry["llm_inference_s"] = time.perf_counter() - t0
-
-        # --- Extract token metrics from llama.cpp usage ---
-        usage = output.get("usage", {})
-        metrics_entry["prompt_tokens"] = usage.get("prompt_tokens", 0)
-        metrics_entry["completion_tokens"] = usage.get("completion_tokens", 0)
-        metrics_entry["total_tokens"] = usage.get("total_tokens", 0)
-        if metrics_entry["llm_inference_s"] > 0 and metrics_entry["completion_tokens"] > 0:
-            metrics_entry["tokens_per_sec"] = metrics_entry["completion_tokens"] / metrics_entry["llm_inference_s"]
-        else:
-            metrics_entry["tokens_per_sec"] = 0
-
-        metrics_entry["total_summary_s"] = metrics_entry["prompt_construct_s"] + metrics_entry["llm_inference_s"]
-        self._metrics.append(metrics_entry)
-
-        return output['choices'][0]['text'].strip()
-
-    def answer_question(self, query):
-        if not self.vector_store:
-            return "Please ingest a document first."
-
-        metrics_entry = {"stage": "qa_inference", "query": query[:80]}
-
-        # --- Retrieval (with internal timing) ---
-        t0 = time.perf_counter()
-        relevant_docs, retrieval_metrics = self._get_relevant_chunks(query, top_k=7)
-        metrics_entry.update(retrieval_metrics)
-        
-        # --- Context Assembly ---
-        context_str = "\n\n".join([
-            f"[Source {i+1}]: {doc.page_content}" 
-            for i, doc in enumerate(relevant_docs)
-        ])
-        metrics_entry["context_chars"] = len(context_str)
-
-        system_msg = (
-            "You are a strict legal assistant. Answer the user's question using ONLY the provided Context sources. "
-            "Do not infer 'selling' of data unless the text explicitly states 'we sell data'. "
-            "Distinguish between 'sharing' (for functionality) and 'selling' (for profit). "
-            "If the answer is not present in the sources, say 'NOT_IN_DOCUMENT'."
-        )
-        
-        user_msg = f"Context:\n{context_str}\n\nQuestion: {query}"
-
-        # --- LLM Inference ---
-        t0 = time.perf_counter()
+    @traceable(name="Llama.cpp Inference")
+    def _llm_chat(
+        self, system_msg: str, user_msg: str, max_tokens: int = 400
+    ) -> tuple[str, dict]:
+        """Chat-completion wrapper; returns (answer_text, usage_metrics)."""
+        t0     = time.perf_counter()
         output = self.llm.create_chat_completion(
             messages=[
                 {"role": "system", "content": system_msg},
-                {"role": "user", "content": user_msg}
+                {"role": "user",   "content": user_msg},
             ],
-            temperature=0.2,
-            max_tokens=400,
+            temperature=0.0,
+            max_tokens=max_tokens,
             repeat_penalty=1.1,
-            stop=["<|im_end|>"]
+            stop=["<|im_end|>"],
         )
-        metrics_entry["llm_inference_s"] = time.perf_counter() - t0
-
-        # --- Extract token metrics from llama.cpp usage ---
-        usage = output.get("usage", {})
-        metrics_entry["prompt_tokens"] = usage.get("prompt_tokens", 0)
-        metrics_entry["completion_tokens"] = usage.get("completion_tokens", 0)
-        metrics_entry["total_tokens"] = usage.get("total_tokens", 0)
-        if metrics_entry["llm_inference_s"] > 0 and metrics_entry["completion_tokens"] > 0:
-            metrics_entry["tokens_per_sec"] = metrics_entry["completion_tokens"] / metrics_entry["llm_inference_s"]
-        else:
-            metrics_entry["tokens_per_sec"] = 0
-
-        metrics_entry["total_qa_s"] = metrics_entry["total_retrieval_s"] + metrics_entry["llm_inference_s"]
-        self._metrics.append(metrics_entry)
-
-        return {
-            "answer": output['choices'][0]['message']['content'],
-            "sources": [d.page_content[:200] + "..." for d in relevant_docs]
+        elapsed = time.perf_counter() - t0
+        usage   = output.get("usage", {})
+        comp    = usage.get("completion_tokens", 0)
+        return output['choices'][0]['message']['content'], {
+            "llm_inference_s":   elapsed,
+            "prompt_tokens":     usage.get("prompt_tokens", 0),
+            "completion_tokens": comp,
+            "total_tokens":      usage.get("total_tokens", 0),
+            "tokens_per_sec":    comp / elapsed if elapsed > 0 and comp > 0 else 0,
         }
 
-    def get_metrics(self):
-        """Return a copy of all accumulated timing metrics."""
+    # =========================================================================
+    # RAG-based summarisation with per-topic citations
+    # =========================================================================
+
+    @traceable(name="Generate Global Summary")
+    def generate_global_summary(self) -> dict:
+        """
+        For every topic in SUMMARY_TOPICS:
+          1. Retrieve the top-3 most relevant chunks via hybrid search.
+          2. Ask the LLM to write 2-4 sentences about the topic, with [SOURCE N] tags.
+          3. Parse which sources were actually cited.
+
+        Returns:
+            {
+              "topics": [
+                  {
+                    "label":   "Data Collection",
+                    "summary": "The service collects ... [SOURCE 1].",
+                    "sources": [ {tag, citation, section, page, excerpt}, ... ]
+                  },
+                  ...
+              ],
+              "metrics": { ... }
+            }
+        """
+        if not self.vector_store:
+            return {"topics": [], "error": "No document loaded."}
+
+        metrics_entry: dict = {"stage": "global_summary", "topics": []}
+        topic_results: list = []
+        seen_ids: set[int]  = set()   # deduplicate chunks across topics
+        t_total = time.perf_counter()
+
+        system_msg = (
+            f"You are a legal expert summarising a {self.doc_type} for {self.service_name}. "
+            "Using ONLY the provided source excerpts, write 2-4 concise sentences on the topic. "
+            "After each factual claim add a citation tag like [SOURCE N]. "
+            "If the topic is not covered in the sources, write exactly: 'NOT_IN_DOCUMENT'."
+        )
+
+        for label, query in SUMMARY_TOPICS:
+            t0   = time.perf_counter()
+            docs, rm = self._get_relevant_chunks(query, top_k=3)
+
+            # Prefer fresh chunks; fall back to all retrieved if every chunk is a duplicate
+            fresh = [d for d in docs if d.metadata["chunk_id"] not in seen_ids] or docs
+
+            context_parts = []
+            for i, doc in enumerate(fresh):
+                seen_ids.add(doc.metadata["chunk_id"])
+                context_parts.append(
+                    f"[SOURCE {i+1} | {doc.metadata.get('citation', '')}]:\n{doc.page_content}"
+                )
+
+            user_msg     = f"Topic: {label}\n\nSources:\n" + "\n\n".join(context_parts)
+            summary_text, llm_m = self._llm_chat(system_msg, user_msg, max_tokens=250)
+
+            # Parse cited indices
+            cited_indices = {
+                int(m.group(1)) - 1
+                for m in re.finditer(r'\[SOURCE (\d+)\]', summary_text)
+                if 0 <= int(m.group(1)) - 1 < len(fresh)
+            }
+            cited_sources = [
+                {
+                    "tag":      f"[SOURCE {idx+1}]",
+                    "citation": fresh[idx].metadata.get("citation", ""),
+                    "section":  fresh[idx].metadata.get("section", "General"),
+                    "page":     fresh[idx].metadata.get("page", 0) + 1,
+                    "excerpt":  fresh[idx].page_content[:350] + "...",
+                }
+                for idx in sorted(cited_indices)
+            ]
+
+            topic_results.append({
+                "label":   label,
+                "summary": summary_text,
+                "sources": cited_sources,
+            })
+            metrics_entry["topics"].append({
+                "label":             label,
+                "retrieval_s":       rm["total_retrieval_s"],
+                "llm_inference_s":   llm_m["llm_inference_s"],
+                "total_s":           time.perf_counter() - t0,
+                "prompt_tokens":     llm_m["prompt_tokens"],
+                "completion_tokens": llm_m["completion_tokens"],
+            })
+
+        metrics_entry["total_summary_s"] = time.perf_counter() - t_total
+        self._metrics.append(metrics_entry)
+        return {"topics": topic_results, "metrics": metrics_entry}
+
+    # =========================================================================
+    # QA with inline citations
+    # =========================================================================
+
+    @traceable(name="QA Inference")
+    def answer_question(self, query: str) -> dict:
+        if not self.vector_store:
+            return {
+                "answer": "Please ingest a document first.",
+                "cited_sources": [], "all_retrieved": [],
+            }
+
+        metrics_entry: dict = {"stage": "qa_inference", "query": query[:80]}
+
+        # Retrieval
+        relevant_docs, rm = self._get_relevant_chunks(query, top_k=7)
+        metrics_entry.update(rm)
+
+        # Context assembly
+        context_parts: list[str] = []
+        for i, doc in enumerate(relevant_docs):
+            citation   = doc.metadata.get("citation", f"chunk-{i}")
+            section    = doc.metadata.get("section", "")
+            subsection = doc.metadata.get("subsection", "")
+            header     = f"[SOURCE {i+1} | {citation}]"
+            if section and section != "General":
+                header += f"\nSection: {section}"
+                if subsection:
+                    header += f" › {subsection}"
+            context_parts.append(f"{header}:\n{doc.page_content}")
+
+        context_str = "\n\n".join(context_parts)
+        metrics_entry["context_chars"] = len(context_str)
+
+        system_msg = (
+            "You are a strict legal assistant. Answer the user's question using ONLY the provided "
+            "Context sources. After EVERY factual claim cite its source using [SOURCE N]. "
+            "Multiple sources per sentence are allowed: [SOURCE 1][SOURCE 3]. "
+            "Do not infer 'selling' of data unless the text explicitly states 'we sell data'. "
+            "Distinguish 'sharing' (for functionality) from 'selling' (for profit). "
+            "If the answer is absent from all sources, respond: 'NOT_IN_DOCUMENT'."
+        )
+        user_msg = f"Context:\n{context_str}\n\nQuestion: {query}"
+
+        answer_text, llm_m = self._llm_chat(system_msg, user_msg, max_tokens=450)
+        metrics_entry.update(llm_m)
+        metrics_entry["total_qa_s"] = rm["total_retrieval_s"] + llm_m["llm_inference_s"]
+        self._metrics.append(metrics_entry)
+
+        # Parse [SOURCE N] references that appear in the answer
+        cited_indices = {
+            int(m.group(1)) - 1
+            for m in re.finditer(r'\[SOURCE (\d+)\]', answer_text)
+            if 0 <= int(m.group(1)) - 1 < len(relevant_docs)
+        }
+
+        def _source_dict(idx: int, doc: Document) -> dict:
+            return {
+                "tag":        f"[SOURCE {idx+1}]",
+                "citation":   doc.metadata.get("citation", ""),
+                "section":    doc.metadata.get("section", "General"),
+                "subsection": doc.metadata.get("subsection", ""),
+                "page":       doc.metadata.get("page", 0) + 1,
+                "excerpt":    doc.page_content[:400] + (
+                    "..." if len(doc.page_content) > 400 else ""
+                ),
+            }
+
+        return {
+            "answer": answer_text,
+            "cited_sources": [
+                _source_dict(idx, relevant_docs[idx]) for idx in sorted(cited_indices)
+            ],
+            "all_retrieved": [
+                {
+                    "tag":      f"[SOURCE {i+1}]",
+                    "citation": d.metadata.get("citation", ""),
+                    "section":  d.metadata.get("section", "General"),
+                    "page":     d.metadata.get("page", 0) + 1,
+                    "excerpt":  d.page_content[:200] + "...",
+                }
+                for i, d in enumerate(relevant_docs)
+            ],
+        }
+
+    # =========================================================================
+    # Metrics
+    # =========================================================================
+
+    def get_metrics(self) -> list:
         return list(self._metrics)
 
     def reset_metrics(self):
-        """Clear all accumulated metrics (keeps init metrics)."""
-        init_metrics = [m for m in self._metrics if m.get("stage") == "init"]
-        self._metrics = init_metrics
+        self._metrics = [m for m in self._metrics if m.get("stage") == "init"]
