@@ -13,14 +13,46 @@ from pathlib import Path
 from langchain_community.document_loaders import PyPDFLoader, TextLoader
 from langchain_text_splitters import MarkdownHeaderTextSplitter, RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_community.vectorstores import FAISS
+from langchain_pinecone import PineconeVectorStore
 from langchain_community.retrievers import BM25Retriever
 from langchain_core.documents import Document
 from llama_cpp import Llama
 from sentence_transformers import CrossEncoder
+from pinecone import Pinecone as PineconeClient
 import re
 import time
+import dataclasses
 from langsmith import traceable
+
+
+# ---------------------------------------------------------------------------
+# Per-session document state (isolated per user/tab)
+# ---------------------------------------------------------------------------
+@dataclasses.dataclass
+class SessionState:
+    """
+    Lightweight per-session state. No in-memory vector store.
+    All embeddings live in Pinecone under `pinecone_namespace`.
+    """
+    pinecone_namespace: str  = ""      # "{user_id}_{document_id}" — unique per upload
+    document_id:        str  = ""      # UUID of the row in the Supabase documents table
+    service_name:       str  = "Unknown Service"
+    doc_type:           str  = "Unknown Document"
+    last_accessed:      float = dataclasses.field(default_factory=lambda: __import__('time').time())
+    # Cached candidates for BM25 in-memory rerank (populated on first ingest)
+    cached_chunks:      list = dataclasses.field(default_factory=list)
+
+    @property
+    def has_document(self) -> bool:
+        return bool(self.pinecone_namespace)
+
+    def reset(self):
+        """Clear document state while keeping session alive."""
+        self.pinecone_namespace = ""
+        self.document_id        = ""
+        self.service_name       = "Unknown Service"
+        self.doc_type           = "Unknown Document"
+        self.cached_chunks      = []
 
 
 # ---------------------------------------------------------------------------
@@ -44,11 +76,30 @@ SUMMARY_TOPICS = [
 
 
 class TOSAssistant:
+    """
+    Holds ALL shared, expensive ML model resources (LLM, embeddings, cross-encoder,
+    splitters). These are loaded once at startup and shared across all user sessions.
+
+    Per-session document state (vector store, BM25 index, chunks, etc.) lives in
+    a SessionState object that is passed to each method, enabling true multi-tenancy
+    without duplicating the heavy models.
+    """
+
     def __init__(self, model_path, index_dir="faiss_index"):
         self.index_dir = Path(index_dir)
         self._metrics  = []
 
-        # ── GGUF Model ──────────────────────────────────────────────────────
+        # ── Pinecone client (shared, stateless connection) ───────────────────
+        pinecone_api_key = os.getenv("PINECONE_API_KEY")
+        index_name       = os.getenv("PINECONE_INDEX_NAME", "tos-summarizer")
+        if not pinecone_api_key:
+            raise EnvironmentError("PINECONE_API_KEY is not set in the environment.")
+        self._pc          = PineconeClient(api_key=pinecone_api_key)
+        self._pc_index    = self._pc.Index(index_name)
+        self._index_name  = index_name
+        print(f"Connected to Pinecone index: {index_name}")
+
+        # ── GGUF Model (shared) ──────────────────────────────────────────────
         print(f"Loading RAG Model: {Path(model_path).name}")
         t0 = time.perf_counter()
         self.llm = Llama(
@@ -67,7 +118,7 @@ class TOSAssistant:
         local_embed  = PROJECT_ROOT / "models" / "embeddings"
         local_cross  = PROJECT_ROOT / "models" / "cross-encoder" / "ms-marco-MiniLM-L-6-v2"
 
-        # ── Embedding Model ──────────────────────────────────────────────────
+        # ── Embedding Model (shared) ─────────────────────────────────────────
         print("Loading Embeddings & Cross-Encoder...")
         t0 = time.perf_counter()
         self.embed_model = HuggingFaceEmbeddings(
@@ -79,7 +130,7 @@ class TOSAssistant:
             "latency_s": time.perf_counter() - t0,
         })
 
-        # ── Cross-Encoder ────────────────────────────────────────────────────
+        # ── Cross-Encoder (shared) ───────────────────────────────────────────
         t0 = time.perf_counter()
         self.cross_encoder = CrossEncoder(str(local_cross))
         self._metrics.append({
@@ -87,8 +138,7 @@ class TOSAssistant:
             "latency_s": time.perf_counter() - t0,
         })
 
-        # ── Splitters (built once, reused across ingestions) ─────────────────
-        # Stage 1: structural split by Markdown headers produced by pre-processor
+        # ── Splitters (shared, stateless — safe to reuse across sessions) ────
         self.header_splitter = MarkdownHeaderTextSplitter(
             headers_to_split_on=[
                 ("#",    "doc_title"),
@@ -96,22 +146,14 @@ class TOSAssistant:
                 ("###",  "subsection"),
                 ("####", "clause"),
             ],
-            strip_headers=False,   # keep header text in chunk body for context
+            strip_headers=False,
         )
-        # Stage 2: sub-split long sections, respecting sentence boundaries
         self.sub_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=3500,        # ~875 tokens at 4 chars/token
-            chunk_overlap=700,      # ~175 tokens of genuine overlap
+            chunk_size=3500,
+            chunk_overlap=700,
             separators=["\n\n", "\n", ". ", " ", ""],
         )
-
-        # ── Runtime state ────────────────────────────────────────────────────
-        self.vector_store:   FAISS | None         = None
-        self.bm25_retriever: BM25Retriever | None = None
-        self.all_chunks:     list[Document]       = []
-        self.full_text   = ""
-        self.doc_type    = "Unknown Document"
-        self.service_name = "Unknown Service"
+        # NOTE: No per-session state here — all document state lives in SessionState.
 
     # =========================================================================
     # Pre-processing: raw text → structured Markdown
@@ -323,7 +365,7 @@ class TOSAssistant:
     # Ingestion — PDF
     # =========================================================================
 
-    def ingest_document(self, pdf_path: str):
+    def ingest_document(self, pdf_path: str, state: SessionState):
         print(f"Ingesting PDF: {pdf_path}")
         m: dict = {"stage": "ingest_document", "document": str(pdf_path)}
 
@@ -333,18 +375,18 @@ class TOSAssistant:
         m["page_count"]  = len(documents)
 
         t0 = time.perf_counter()
-        self.full_text = '\n'.join(self.clean_text(d.page_content) for d in documents)
+        state.full_text = '\n'.join(self.clean_text(d.page_content) for d in documents)
         m["text_clean_s"] = time.perf_counter() - t0
-        m["total_chars"]  = len(self.full_text)
+        m["total_chars"]  = len(state.full_text)
 
-        self._index_chunks(documents, m)
+        self._index_chunks(documents, m, state)
         print("PDF ingestion complete.")
 
     # =========================================================================
     # Ingestion — plain text / scraped URL
     # =========================================================================
 
-    def ingest_text_file(self, txt_path: str):
+    def ingest_text_file(self, txt_path: str, state: SessionState):
         print(f"Ingesting text file: {txt_path}")
         m: dict = {"stage": "ingest_text", "document": str(txt_path)}
 
@@ -355,20 +397,20 @@ class TOSAssistant:
         for doc in documents:
             doc.metadata.setdefault("page", 0)   # no real pages in scraped text
 
-        self.full_text  = self.clean_text(documents[0].page_content)
-        m["total_chars"] = len(self.full_text)
+        state.full_text  = self.clean_text(documents[0].page_content)
+        m["total_chars"] = len(state.full_text)
 
-        self._index_chunks(documents, m)
+        self._index_chunks(documents, m, state)
         print("Text ingestion complete.")
 
     # =========================================================================
     # Shared indexing logic
     # =========================================================================
 
-    def _index_chunks(self, documents: list[Document], metrics: dict):
+    def _index_chunks(self, documents: list[Document], metrics: dict, state: SessionState):
         t0 = time.perf_counter()
-        chunks          = self._build_chunks(documents)
-        self.all_chunks = chunks
+        chunks              = self._build_chunks(documents)
+        state.cached_chunks = chunks          # keep for BM25 reranking
         metrics["chunking_s"]  = time.perf_counter() - t0
         metrics["chunk_count"] = len(chunks)
 
@@ -376,24 +418,22 @@ class TOSAssistant:
             print("WARNING: No chunks produced — check document content.")
             return
 
-        # FAISS (dense / semantic)
+        # Embed and upsert to Pinecone (namespaced per user+document)
         t0 = time.perf_counter()
-        self.vector_store = FAISS.from_documents(chunks, self.embed_model)
-        metrics["faiss_index_s"] = time.perf_counter() - t0
-
-        # BM25 (sparse / lexical — critical for exact legal terminology)
-        t0 = time.perf_counter()
-        self.bm25_retriever   = BM25Retriever.from_documents(chunks)
-        self.bm25_retriever.k = 20
-        metrics["bm25_index_s"] = time.perf_counter() - t0
+        PineconeVectorStore.from_documents(
+            chunks,
+            self.embed_model,
+            index_name=self._index_name,
+            namespace=state.pinecone_namespace,
+        )
+        metrics["pinecone_upsert_s"] = time.perf_counter() - t0
 
         metrics["total_ingest_s"] = (
             metrics.get("pdf_parse_s", 0) +
             metrics.get("text_load_s", 0) +
             metrics.get("text_clean_s", 0) +
             metrics["chunking_s"] +
-            metrics["faiss_index_s"] +
-            metrics["bm25_index_s"]
+            metrics["pinecone_upsert_s"]
         )
         self._metrics.append(metrics)
 
@@ -412,37 +452,46 @@ class TOSAssistant:
                 doc_map[cid] = doc
         return [doc_map[cid] for cid in sorted(scores, key=scores.__getitem__, reverse=True)]
 
-    @traceable(name="Hybrid Retrieval (FAISS + BM25)")
+    @traceable(name="Hybrid Retrieval (Pinecone + BM25)")
     def _get_relevant_chunks(
-        self, query: str, top_k: int = 7
+        self, query: str, state: SessionState, top_k: int = 7
     ) -> tuple[list[Document], dict]:
         rm: dict = {}
 
-        # FAISS MMR — diverse semantic results
+        # Step 1: Pinecone semantic search (namespaced to this user's document)
         t0 = time.perf_counter()
-        faiss_results = self.vector_store.max_marginal_relevance_search(
-            query, k=30, fetch_k=80, lambda_mult=0.5
+        vec_store     = PineconeVectorStore(
+            index=self._pc_index,
+            embedding=self.embed_model,
+            namespace=state.pinecone_namespace,
         )
-        rm["mmr_search_s"]   = time.perf_counter() - t0
-        rm["mmr_candidates"] = len(faiss_results)
+        pinecone_results = vec_store.similarity_search(query, k=50)
+        rm["pinecone_search_s"]   = time.perf_counter() - t0
+        rm["pinecone_candidates"] = len(pinecone_results)
 
-        # BM25 — exact keyword match ("arbitration", "indemnify", "COPPA", …)
+        if not pinecone_results:
+            return [], rm
+
+        # Step 2: Inline BM25 rerank on the Pinecone candidate set
+        # (no need to index all chunks — BM25 here scores only the 50 candidates)
         t0 = time.perf_counter()
-        bm25_results = self.bm25_retriever.invoke(query)
-        rm["bm25_search_s"]   = time.perf_counter() - t0
-        rm["bm25_candidates"] = len(bm25_results)
+        bm25 = BM25Retriever.from_documents(pinecone_results, k=30)
+        bm25_results = bm25.invoke(query)
+        rm["bm25_rerank_s"]    = time.perf_counter() - t0
+        rm["bm25_candidates"]  = len(bm25_results)
 
-        # Merge with RRF, cap pool before expensive reranking
-        candidates = self._reciprocal_rank_fusion(faiss_results, bm25_results)[:50]
+        # Step 3: Merge Pinecone + BM25 with RRF then cross-encode top-50
+        candidates = self._reciprocal_rank_fusion(pinecone_results, bm25_results)[:50]
 
-        # Cross-encoder rerank for precision
+        # Step 4: Cross-encoder rerank for precision (uses shared model)
         t0 = time.perf_counter()
         pairs  = [[query, doc.page_content] for doc in candidates]
         scores = self.cross_encoder.predict(pairs)
         ranked = sorted(zip(candidates, scores), key=lambda x: x[1], reverse=True)
         rm["rerank_s"] = time.perf_counter() - t0
 
-        rm["total_retrieval_s"] = rm["mmr_search_s"] + rm["bm25_search_s"] + rm["rerank_s"]
+        rm["mmr_search_s"] = rm["pinecone_search_s"]  # keep key name for metrics compat
+        rm["total_retrieval_s"] = rm["pinecone_search_s"] + rm["bm25_rerank_s"] + rm["rerank_s"]
         return [doc for doc, _ in ranked[:top_k]], rm
 
     # =========================================================================
@@ -488,7 +537,7 @@ class TOSAssistant:
     # =========================================================================
 
     @traceable(name="Generate Global Summary")
-    def generate_global_summary(self) -> dict:
+    def generate_global_summary(self, state: SessionState) -> dict:
         """
         For every topic in SUMMARY_TOPICS:
           1. Retrieve the top-3 most relevant chunks via hybrid search.
@@ -508,16 +557,18 @@ class TOSAssistant:
               "metrics": { ... }
             }
         """
-        if not self.vector_store:
+        if not state.has_document:
             return {"topics": [], "error": "No document loaded."}
 
         metrics_entry: dict = {"stage": "global_summary", "topics": []}
         topic_results: list = []
         seen_ids: set[int]  = set()   # deduplicate chunks across topics
+        service_name        = state.service_name
+        doc_type            = state.doc_type
         t_total = time.perf_counter()
 
         system_msg = (
-            f"You are a legal expert summarising a {self.doc_type} for {self.service_name}. "
+            f"You are a legal expert summarising a {doc_type} for {service_name}. "
             "Using ONLY the provided source excerpts, write 2-4 concise sentences on the topic. "
             "After each factual claim add a citation tag like [SOURCE N]. "
             "If the topic is not covered in the sources, write exactly: 'NOT_IN_DOCUMENT'."
@@ -525,7 +576,7 @@ class TOSAssistant:
 
         for label, query in SUMMARY_TOPICS:
             t0   = time.perf_counter()
-            docs, rm = self._get_relevant_chunks(query, top_k=3)
+            docs, rm = self._get_relevant_chunks(query, state, top_k=3)
 
             # Prefer fresh chunks; fall back to all retrieved if every chunk is a duplicate
             fresh = [d for d in docs if d.metadata["chunk_id"] not in seen_ids] or docs
@@ -580,8 +631,8 @@ class TOSAssistant:
     # =========================================================================
 
     @traceable(name="QA Inference")
-    def answer_question(self, query: str) -> dict:
-        if not self.vector_store:
+    def answer_question(self, query: str, state: SessionState) -> dict:
+        if not state.has_document:
             return {
                 "answer": "Please ingest a document first.",
                 "cited_sources": [], "all_retrieved": [],
@@ -590,7 +641,7 @@ class TOSAssistant:
         metrics_entry: dict = {"stage": "qa_inference", "query": query[:80]}
 
         # Retrieval
-        relevant_docs, rm = self._get_relevant_chunks(query, top_k=7)
+        relevant_docs, rm = self._get_relevant_chunks(query, state, top_k=7)
         metrics_entry.update(rm)
 
         # Context assembly
