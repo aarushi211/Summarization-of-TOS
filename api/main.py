@@ -92,7 +92,18 @@ async def lifespan(app: FastAPI):
     logger.info("Shutting down.")
 
 
+from fastapi.middleware.cors import CORSMiddleware
+
 app = FastAPI(title="TOS Summarizer API", version="2.0", lifespan=lifespan)
+
+# Add CORS Middleware to allow React frontend to communicate with FastAPI
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000", "http://localhost:8501"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 # ── JWT Auth ──────────────────────────────────────────────────────────────────
