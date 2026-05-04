@@ -54,9 +54,11 @@ export default function Dashboard() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [chatInput, setChatInput] = useState("");
   const [isChatting, setIsChatting] = useState(false);
-  const [summaryData, setSummaryData] = useState<any>(null);
+  const [summaryTopics, setSummaryTopics] = useState<any[]>([]);
   const [isSummarizing, setIsSummarizing] = useState(false);
+  const [docStatus, setDocStatus] = useState<string>("ready");
   const chatEndRef = useRef<HTMLDivElement>(null);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Initial load
   useEffect(() => {
@@ -96,33 +98,20 @@ export default function Dashboard() {
 
   const handleUpload = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!file) { alert("Please select a file."); return; }
     setIsUploading(true);
-    
+
     try {
-      let res;
-      if (uploadMode === "pdf") {
-        if (!file) throw new Error("Please select a file.");
-        const formData = new FormData();
-        formData.append("file", file);
-        formData.append("service_name", serviceName || "Unknown");
-        formData.append("doc_type", docType);
-        
-        res = await fetch(`${API_URL}/ingest/pdf`, {
-          method: "POST",
-          headers: { Authorization: `Bearer ${token}` },
-          body: formData
-        });
-      } else {
-        if (!urlInput) throw new Error("Please enter a URL.");
-        
-        // Basic scraping (in reality, backend handles this now if we hit the right endpoint)
-        // Wait, backend /ingest/text expects raw text. 
-        // For a portfolio, let's just show an error if they pick URL since we didn't implement 
-        // a pure URL scraper endpoint (the streamlit one did it client-side/server-side python).
-        // Actually, the API has /ingest/text. We'd have to scrape first. 
-        // Let's just focus on PDF upload for the React demo to keep it rock solid.
-        throw new Error("URL scraping is under maintenance. Please use PDF upload.");
-      }
+      const formData = new FormData();
+      formData.append("file", file);
+      formData.append("service_name", serviceName || "Unknown");
+      formData.append("doc_type", docType);
+
+      const res = await fetch(`${API_URL}/ingest/pdf`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+        body: formData,
+      });
 
       if (!res.ok) {
         const d = await res.json();
@@ -130,18 +119,39 @@ export default function Dashboard() {
       }
 
       const data = await res.json();
-      const newDoc = {
+      const newDoc: Document = {
         id: data.document_id,
-        filename: file?.name || "Uploaded Document",
+        filename: file.name,
         service_name: serviceName || "Unknown",
         doc_type: docType,
-        created_at: new Date().toISOString()
+        created_at: new Date().toISOString(),
       };
-      
+
       setActiveDoc(newDoc);
       setMessages([]);
-      setSummaryData(null);
+      setSummaryTopics([]);
+      setDocStatus("processing");
       fetchHistory(token);
+
+      // Poll every 3s until the document is ready
+      if (pollRef.current) clearInterval(pollRef.current);
+      pollRef.current = setInterval(async () => {
+        try {
+          const r = await fetch(`${API_URL}/documents/${data.document_id}/status`, {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          if (r.ok) {
+            const s = await r.json();
+            setDocStatus(s.status);
+            if (s.status === "ready" || s.status === "error") {
+              clearInterval(pollRef.current!);
+              pollRef.current = null;
+              fetchHistory(token);
+            }
+          }
+        } catch { /* ignore */ }
+      }, 3000);
+
     } catch (err: any) {
       alert(err.message);
     } finally {
@@ -180,24 +190,41 @@ export default function Dashboard() {
   const handleGenerateSummary = async () => {
     if (!activeDoc) return;
     setIsSummarizing(true);
+    setSummaryTopics([]);
+
+    const params = new URLSearchParams({
+      document_id:  activeDoc.id,
+      service_name: activeDoc.service_name,
+      doc_type:     activeDoc.doc_type,
+    });
+
     try {
-      const res = await fetch(`${API_URL}/summary`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`
-        },
-        body: JSON.stringify({
-          document_id: activeDoc.id,
-          service_name: activeDoc.service_name,
-          doc_type: activeDoc.doc_type
-        })
+      const res = await fetch(`${API_URL}/summary/stream?${params}`, {
+        headers: { Authorization: `Bearer ${token}` },
       });
-      const data = await res.json();
-      setSummaryData(data);
+      if (!res.body) throw new Error("No stream body");
+
+      const reader  = res.body.getReader();
+      const decoder = new TextDecoder();
+      let   buffer  = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          const event = JSON.parse(line.slice(6));
+          if (event.type === "topic_ready") {
+            setSummaryTopics(prev => [...prev, event.data]);
+          }
+        }
+      }
     } catch (err) {
       console.error(err);
-      alert("Failed to generate summary");
+      alert("Failed to generate summary.");
     } finally {
       setIsSummarizing(false);
     }
@@ -209,31 +236,66 @@ export default function Dashboard() {
 
     const userMsg = chatInput;
     setMessages(prev => [...prev, { role: "user", content: userMsg }]);
+    // Placeholder for the streaming assistant message
+    setMessages(prev => [...prev, { role: "assistant", content: "", cited_sources: [] }]);
     setChatInput("");
     setIsChatting(true);
 
     try {
-      const res = await fetch(`${API_URL}/chat`, {
+      const res = await fetch(`${API_URL}/chat/stream`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`
+          Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({
-          query: userMsg,
-          document_id: activeDoc.id,
-          service_name: activeDoc.service_name
-        })
+          query:        userMsg,
+          document_id:  activeDoc.id,
+          service_name: activeDoc.service_name,
+        }),
       });
-      const data = await res.json();
-      setMessages(prev => [...prev, { 
-        role: "assistant", 
-        content: data.answer,
-        cited_sources: data.cited_sources
-      }]);
+      if (!res.body) throw new Error("No stream");
+
+      const reader  = res.body.getReader();
+      const decoder = new TextDecoder();
+      let   buffer  = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          const event = JSON.parse(line.slice(6));
+          if (event.type === "token") {
+            // Append token to the last message in-place
+            setMessages(prev => {
+              const next = [...prev];
+              const last = { ...next[next.length - 1] };
+              last.content += event.data;
+              next[next.length - 1] = last;
+              return next;
+            });
+          } else if (event.type === "sources") {
+            setMessages(prev => {
+              const next = [...prev];
+              const last = { ...next[next.length - 1] };
+              last.cited_sources = event.data;
+              next[next.length - 1] = last;
+              return next;
+            });
+          }
+        }
+      }
     } catch (err) {
       console.error(err);
-      setMessages(prev => [...prev, { role: "assistant", content: "Sorry, an error occurred." }]);
+      setMessages(prev => {
+        const next = [...prev];
+        next[next.length - 1] = { role: "assistant", content: "Sorry, an error occurred." };
+        return next;
+      });
     } finally {
       setIsChatting(false);
     }
@@ -409,7 +471,7 @@ export default function Dashboard() {
                   </div>
                   
                   <button type="submit" className="btn btn-primary" style={{ width: "100%", marginTop: "1rem" }} disabled={isUploading}>
-                    {isUploading ? <><Loader2 className="spinner" size={18} /> Processing PDF...</> : "Ingest Document"}
+                    {isUploading ? <><Loader2 className="spinner" size={18} /> Uploading...</> : "Ingest Document"}
                   </button>
                 </form>
               </div>
@@ -428,21 +490,29 @@ export default function Dashboard() {
                     className="btn btn-secondary" 
                     style={{ padding: "0.5rem 1rem", fontSize: "0.75rem" }}
                     onClick={handleGenerateSummary}
-                    disabled={isSummarizing}
+                    disabled={isSummarizing || docStatus === "processing"}
                   >
-                    {isSummarizing ? <Loader2 className="spinner" size={14} /> : "Generate Summary"}
+                    {isSummarizing ? <><Loader2 className="spinner" size={14} /> Analyzing...</> : "Generate Summary"}
                   </button>
                 </div>
+
+                {/* Status banner when processing */}
+                {docStatus === "processing" && (
+                  <div style={{ padding: "1rem", background: "rgba(251,191,36,0.08)", border: "1px solid rgba(251,191,36,0.2)", borderRadius: "0.75rem", display: "flex", alignItems: "center", gap: "0.75rem" }}>
+                    <Loader2 className="spinner" size={18} color="#fbbf24" />
+                    <span style={{ fontSize: "0.875rem", color: "#fbbf24" }}>Indexing document in background… This may take a minute.</span>
+                  </div>
+                )}
                 
-                {!summaryData && !isSummarizing && (
+                {summaryTopics.length === 0 && !isSummarizing && docStatus !== "processing" && (
                   <div className="glass-card" style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "4rem 2rem", opacity: 0.7 }}>
                     <Info size={32} color="var(--text-muted)" style={{ marginBottom: "1rem" }} />
                     <p style={{ textAlign: "center", color: "var(--text-secondary)" }}>Click generate to extract key clauses across 12 legal topics.</p>
                   </div>
                 )}
                 
-                {summaryData?.topics?.map((topic: any, idx: number) => (
-                  <div key={idx} className="glass-card" style={{ padding: "1.5rem" }}>
+                {summaryTopics.map((topic: any, idx: number) => (
+                  <div key={idx} className="glass-card" style={{ padding: "1.5rem", animation: "fadeIn 0.4s ease-out" }}>
                     <h3 style={{ fontSize: "1rem", fontWeight: 600, marginBottom: "0.75rem", color: topic.summary.includes("NOT_IN_DOCUMENT") ? "var(--text-muted)" : "white" }}>
                       {topic.label}
                     </h3>
@@ -472,6 +542,16 @@ export default function Dashboard() {
                     )}
                   </div>
                 ))}
+
+                {/* Skeleton card while more topics are being generated */}
+                {isSummarizing && (
+                  <div className="glass-card" style={{ padding: "1.5rem", opacity: 0.5 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
+                      <Loader2 className="spinner" size={16} color="var(--accent-primary)" />
+                      <span style={{ fontSize: "0.875rem", color: "var(--text-secondary)" }}>Analyzing next topic…</span>
+                    </div>
+                  </div>
+                )}
               </div>
               
               {/* Right Column: Chat */}
@@ -543,19 +623,19 @@ export default function Dashboard() {
                     <input 
                       type="text" 
                       className="input-field" 
-                      placeholder="Ask about data sharing, refunds, governing law..."
+                      placeholder={isSummarizing ? "AI is busy generating summary..." : "Ask about data sharing, refunds, governing law..."}
                       value={chatInput}
                       onChange={e => setChatInput(e.target.value)}
-                      disabled={isChatting}
+                      disabled={isChatting || isSummarizing}
                       style={{ paddingRight: "3rem", background: "rgba(0,0,0,0.3)" }}
                     />
                     <button 
                       type="submit" 
-                      disabled={isChatting || !chatInput.trim()}
+                      disabled={isChatting || isSummarizing || !chatInput.trim()}
                       style={{ 
                         position: "absolute", right: "0.5rem", top: "50%", transform: "translateY(-50%)",
-                        background: chatInput.trim() ? "var(--accent-primary)" : "transparent",
-                        color: chatInput.trim() ? "white" : "var(--text-muted)",
+                        background: chatInput.trim() && !isSummarizing ? "var(--accent-primary)" : "transparent",
+                        color: chatInput.trim() && !isSummarizing ? "white" : "var(--text-muted)",
                         padding: "0.4rem", borderRadius: "0.375rem", transition: "all 0.2s"
                       }}
                     >
