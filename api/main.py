@@ -22,6 +22,9 @@ from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Header, Depe
 from pydantic import BaseModel
 from supabase import create_client, Client
 import jwt as pyjwt
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # ── Path setup ────────────────────────────────────────────────────────────────
 SCRIPT_DIR   = Path(__file__).resolve().parent
