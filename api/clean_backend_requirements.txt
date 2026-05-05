@@ -1,0 +1,43 @@
+# ── Web Framework & API ───────────────────────────────────────────────────────
+fastapi
+uvicorn[standard]
+python-multipart
+slowapi
+
+# ── Auth, Security & Storage ──────────────────────────────────────────────────
+supabase
+PyJWT[crypto]
+boto3
+# Cross-platform magic byte validation
+python-magic-bin; sys_platform == 'win32'
+python-magic; sys_platform == 'linux' or sys_platform == 'darwin'
+
+# ── Vector DB & Retrieval ─────────────────────────────────────────────────────
+pinecone                # Modern SDK (replaces pinecone-client)
+langchain-pinecone
+rank-bm25
+
+# ── LangChain Stack ───────────────────────────────────────────────────────────
+langchain
+langchain-core
+langchain-community
+langchain-huggingface
+langchain-text-splitters
+
+# ── Document Processing ───────────────────────────────────────────────────────
+pypdf
+pymupdf                 # Added from Claude: Highly recommended for faster parsing
+beautifulsoup4
+
+# ── Machine Learning & Embeddings ─────────────────────────────────────────────
+sentence-transformers
+numpy<2.0.0             # CRITICAL PIN: Numpy 2.x breaks many PyTorch/Transformer ops
+
+# ── Utilities & Observability ─────────────────────────────────────────────────
+tenacity
+python-dotenv
+langsmith               # For LangChain tracing/debugging
+
+# ── Testing (Optional: put in requirements-dev.in if preferred) ───────────────
+pytest
+pytest-asyncio

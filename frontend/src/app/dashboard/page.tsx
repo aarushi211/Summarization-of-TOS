@@ -1,16 +1,20 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { useRouter } from "next/navigation";
-import { LogOut, FileText, Upload, Link as LinkIcon, Search, Send, Loader2, Info, ChevronRight, Menu } from "lucide-react";
+import {
+  LogOut, FileText, Upload, Search,
+  Send, Loader2, Info, Menu, Trash2,
+} from "lucide-react";
+import { getValidToken, clearTokens } from "@/lib/api";
 
-const API_URL = "http://localhost:8000";
-
+// ── Types ─────────────────────────────────────────────────────────────────────
 interface Document {
   id: string;
   filename: string;
   service_name: string;
   doc_type: string;
+  status: string;
   created_at: string;
 }
 
@@ -18,6 +22,7 @@ interface Source {
   tag: string;
   citation: string;
   section: string;
+  subsection: string;
   page: number;
   excerpt: string;
 }
@@ -26,79 +31,156 @@ interface Message {
   role: "user" | "assistant";
   content: string;
   cited_sources?: Source[];
+  error?: string;        // typed SSE error surfaced here
+  isStreaming?: boolean;
 }
 
+interface TopicResult {
+  label: string;
+  summary: string;
+  sources: Source[];
+  error?: string;
+}
+
+// ── API URL from env — never hardcoded ───────────────────────────────────────
+const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+
+// ── Authenticated fetch helper ────────────────────────────────────────────────
+// Uses getValidToken() which refreshes automatically before expiry.
+async function authFetch(
+  path: string,
+  options: RequestInit = {},
+): Promise<Response> {
+  const token = await getValidToken();
+  if (!token) throw new Error("NOT_AUTHENTICATED");
+
+  return fetch(`${API_URL}${path}`, {
+    ...options,
+    headers: {
+      ...(options.headers ?? {}),
+      Authorization: `Bearer ${token}`,
+    },
+  });
+}
+
+// ── SSE parser ────────────────────────────────────────────────────────────────
+// Parses the chunked ReadableStream from a fetch Response into SSE events.
+// Handles events split across multiple read() calls (buffer carry-forward).
+async function consumeSse(
+  response: Response,
+  onEvent: (event: Record<string, unknown>) => void,
+): Promise<void> {
+  const reader = response.body?.getReader();
+  if (!reader) return;
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const parts = buffer.split("\n\n");
+      buffer = parts.pop() ?? "";
+      for (const part of parts) {
+        const line = part.trim();
+        if (!line.startsWith("data: ")) continue;
+        try {
+          onEvent(JSON.parse(line.slice(6)));
+        } catch {
+          // Malformed SSE line — skip silently
+        }
+      }
+    }
+  } finally {
+    reader.cancel();
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Component
+// ─────────────────────────────────────────────────────────────────────────────
 export default function Dashboard() {
   const router = useRouter();
-  
-  // Auth state
-  const [userEmail, setUserEmail] = useState("");
-  const [token, setToken] = useState("");
 
-  // UI state
+  // ── Auth ──────────────────────────────────────────────────────────────────
+  const [userEmail, setUserEmail] = useState("");
   const [isSidebarOpen, setSidebarOpen] = useState(true);
-  
-  // Data state
+
+  // ── Data ──────────────────────────────────────────────────────────────────
   const [historyDocs, setHistoryDocs] = useState<Document[]>([]);
   const [activeDoc, setActiveDoc] = useState<Document | null>(null);
-  
-  // Upload state
-  const [uploadMode, setUploadMode] = useState<"pdf" | "url">("pdf");
+
+  // ── Upload ────────────────────────────────────────────────────────────────
   const [file, setFile] = useState<File | null>(null);
-  const [urlInput, setUrlInput] = useState("");
   const [serviceName, setServiceName] = useState("");
   const [docType, setDocType] = useState("Terms of Service");
   const [isUploading, setIsUploading] = useState(false);
 
-  // Chat & Summary state
+  // ── Document status polling ───────────────────────────────────────────────
+  const [docStatus, setDocStatus] = useState<string>("ready");
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // ── Summary ───────────────────────────────────────────────────────────────
+  const [summaryTopics, setSummaryTopics] = useState<TopicResult[]>([]);
+  const [isSummarizing, setIsSummarizing] = useState(false);
+  const [summaryError, setSummaryError] = useState<string | null>(null);
+
+  // ── Chat ──────────────────────────────────────────────────────────────────
   const [messages, setMessages] = useState<Message[]>([]);
   const [chatInput, setChatInput] = useState("");
   const [isChatting, setIsChatting] = useState(false);
-  const [summaryTopics, setSummaryTopics] = useState<any[]>([]);
-  const [isSummarizing, setIsSummarizing] = useState(false);
-  const [docStatus, setDocStatus] = useState<string>("ready");
+  const [chatError, setChatError] = useState<string | null>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // Initial load
-  useEffect(() => {
-    const access_token = localStorage.getItem("access_token");
-    const email = localStorage.getItem("user_email");
-    if (!access_token) {
-      router.push("/");
-      return;
-    }
-    setToken(access_token);
-    setUserEmail(email || "User");
-    fetchHistory(access_token);
-  }, [router]);
+  // ── UI State ──────────────────────────────────────────────────────────────
+  const [activeTab, setActiveTab] = useState<"summary" | "chat">("summary");
+  const [isDeleting, setIsDeleting] = useState(false);
 
+  // ── Scroll to bottom on new messages ─────────────────────────────────────
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  const fetchHistory = async (auth_token: string) => {
+  // ── Auth check on mount ───────────────────────────────────────────────────
+  useEffect(() => {
+    const email = localStorage.getItem("user_email");
+    // getValidToken() reads from sessionStorage (set by login page)
+    getValidToken().then(token => {
+      if (!token) {
+        router.push("/");
+        return;
+      }
+      setUserEmail(email && email !== "undefined" ? email : "User");
+      fetchHistory();
+    });
+  }, [router]);
+
+  // ── Fetch document history ────────────────────────────────────────────────
+  const fetchHistory = useCallback(async () => {
     try {
-      const res = await fetch(`${API_URL}/history/documents`, {
-        headers: { Authorization: `Bearer ${auth_token}` }
-      });
+      const res = await authFetch("/history/documents");
+      if (res.status === 401) { handleLogout(); return; }
       if (res.ok) {
         const data = await res.json();
-        setHistoryDocs(data.documents);
+        setHistoryDocs(data.documents ?? []);
       }
     } catch (err) {
-      console.error("Failed to load history", err);
+      if ((err as Error).message === "NOT_AUTHENTICATED") handleLogout();
     }
-  };
+  }, []);
 
+  // ── Logout ────────────────────────────────────────────────────────────────
   const handleLogout = () => {
-    localStorage.clear();
+    clearTokens();                          // clears sessionStorage + localStorage
+    localStorage.removeItem("user_email");
     router.push("/");
   };
 
+  // ── Upload PDF ────────────────────────────────────────────────────────────
   const handleUpload = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!file) { alert("Please select a file."); return; }
+    if (!file) return;
     setIsUploading(true);
 
     try {
@@ -107,15 +189,11 @@ export default function Dashboard() {
       formData.append("service_name", serviceName || "Unknown");
       formData.append("doc_type", docType);
 
-      const res = await fetch(`${API_URL}/ingest/pdf`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${token}` },
-        body: formData,
-      });
+      const res = await authFetch("/ingest/upload", { method: "POST", body: formData });
 
       if (!res.ok) {
         const d = await res.json();
-        throw new Error(d.detail || "Upload failed");
+        throw new Error(d.detail ?? "Upload failed");
       }
 
       const data = await res.json();
@@ -124,66 +202,79 @@ export default function Dashboard() {
         filename: file.name,
         service_name: serviceName || "Unknown",
         doc_type: docType,
+        status: "processing",
         created_at: new Date().toISOString(),
       };
 
       setActiveDoc(newDoc);
       setMessages([]);
       setSummaryTopics([]);
+      setSummaryError(null);
+      setChatError(null);
       setDocStatus("processing");
-      fetchHistory(token);
+      fetchHistory();
 
-      // Poll every 3s until the document is ready
+      // Poll every 3 s until ready or error
       if (pollRef.current) clearInterval(pollRef.current);
       pollRef.current = setInterval(async () => {
         try {
-          const r = await fetch(`${API_URL}/documents/${data.document_id}/status`, {
-            headers: { Authorization: `Bearer ${token}` },
-          });
+          const r = await authFetch(`/history/documents/${data.document_id}/status`);
           if (r.ok) {
             const s = await r.json();
             setDocStatus(s.status);
             if (s.status === "ready" || s.status === "error") {
               clearInterval(pollRef.current!);
               pollRef.current = null;
-              fetchHistory(token);
+              fetchHistory();
+              // Show error reason if ingestion failed
+              if (s.status === "error" && s.error_reason) {
+                setSummaryError(`Ingestion failed: ${s.error_reason}`);
+              }
             }
           }
-        } catch { /* ignore */ }
+        } catch { /* ignore — will retry next interval */ }
       }, 3000);
 
-    } catch (err: any) {
-      alert(err.message);
+    } catch (err: unknown) {
+      alert(err instanceof Error ? err.message : "Upload failed.");
     } finally {
       setIsUploading(false);
     }
   };
 
+  // ── Load past document ────────────────────────────────────────────────────
   const loadPastDocument = async (doc: Document) => {
     setActiveDoc(doc);
-    setSummaryData(null);
+    setSummaryTopics([]);    // FIX: was setSummaryData(null) — function didn't exist
+    setSummaryError(null);
+    setChatError(null);
     setMessages([]);
-    
+    setDocStatus(doc.status ?? "ready");
+
     try {
-      const res = await fetch(`${API_URL}/history/chats/${doc.id}`, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      if (res.ok) {
-        const data = await res.json();
-        const loadedMsgs: Message[] = [];
-        data.sessions.forEach((s: any) => {
+      // Parallel fetch chat and summary history
+      const [chatRes, summaryRes] = await Promise.all([
+        authFetch(`/history/chats/${doc.id}`),
+        authFetch(`/history/summaries/${doc.id}`)
+      ]);
+
+      if (chatRes.ok) {
+        const data = await chatRes.json();
+        const loaded: Message[] = [];
+        (data.sessions ?? []).forEach((s: any) => {
           s.messages.forEach((m: any) => {
-            loadedMsgs.push({
-              role: m.role,
-              content: m.content,
-              cited_sources: m.cited_sources
-            });
+            loaded.push({ role: m.role, content: m.content, cited_sources: m.sources });
           });
         });
-        setMessages(loadedMsgs);
+        setMessages(loaded);
+      }
+
+      if (summaryRes.ok) {
+        const data = await summaryRes.json();
+        setSummaryTopics(data);
       }
     } catch (err) {
-      console.error(err);
+      console.error("Failed to load document data:", err);
     }
   };
 
@@ -191,109 +282,118 @@ export default function Dashboard() {
     if (!activeDoc) return;
     setIsSummarizing(true);
     setSummaryTopics([]);
-
-    const params = new URLSearchParams({
-      document_id:  activeDoc.id,
-      service_name: activeDoc.service_name,
-      doc_type:     activeDoc.doc_type,
-    });
+    setSummaryError(null);
 
     try {
-      const res = await fetch(`${API_URL}/summary/stream?${params}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (!res.body) throw new Error("No stream body");
-
-      const reader  = res.body.getReader();
-      const decoder = new TextDecoder();
-      let   buffer  = "";
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() ?? "";
-        for (const line of lines) {
-          if (!line.startsWith("data: ")) continue;
-          const event = JSON.parse(line.slice(6));
-          if (event.type === "topic_ready") {
-            setSummaryTopics(prev => [...prev, event.data]);
-          }
-        }
+      const res = await authFetch(`/chat/summary/${activeDoc.id}`);
+      if (!res.ok) {
+        const d = await res.json();
+        throw new Error(d.detail ?? "Failed to start summary stream.");
       }
-    } catch (err) {
-      console.error(err);
-      alert("Failed to generate summary.");
+
+      await consumeSse(res, event => {
+        if (event.type === "topic_ready") {
+          setSummaryTopics(prev => [...prev, event.data as TopicResult]);
+        } else if (event.type === "error") {
+          // Typed error from the pipeline — surface it, don't just log
+          setSummaryError(event.data as string);
+        }
+        // "done" — nothing to do, isSummarizing will be cleared in finally
+      });
+
+    } catch (err: unknown) {
+      setSummaryError(err instanceof Error ? err.message : "Failed to generate summary.");
     } finally {
       setIsSummarizing(false);
     }
   };
 
+  // ── Send chat message (SSE) ───────────────────────────────────────────────
   const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!chatInput.trim() || !activeDoc) return;
+    const query = chatInput.trim();
+    if (!query || !activeDoc) return;
 
-    const userMsg = chatInput;
-    setMessages(prev => [...prev, { role: "user", content: userMsg }]);
-    // Placeholder for the streaming assistant message
-    setMessages(prev => [...prev, { role: "assistant", content: "", cited_sources: [] }]);
     setChatInput("");
+    setChatError(null);
     setIsChatting(true);
 
+    // Append user message + streaming placeholder immediately
+    setMessages(prev => [
+      ...prev,
+      { role: "user", content: query },
+      { role: "assistant", content: "", isStreaming: true },
+    ]);
+
     try {
-      const res = await fetch(`${API_URL}/chat/stream`, {
+      const res = await authFetch("/chat/query", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          query:        userMsg,
-          document_id:  activeDoc.id,
+          query,
+          document_id: activeDoc.id,
           service_name: activeDoc.service_name,
         }),
       });
-      if (!res.body) throw new Error("No stream");
 
-      const reader  = res.body.getReader();
-      const decoder = new TextDecoder();
-      let   buffer  = "";
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() ?? "";
-        for (const line of lines) {
-          if (!line.startsWith("data: ")) continue;
-          const event = JSON.parse(line.slice(6));
-          if (event.type === "token") {
-            // Append token to the last message in-place
-            setMessages(prev => {
-              const next = [...prev];
-              const last = { ...next[next.length - 1] };
-              last.content += event.data;
-              next[next.length - 1] = last;
-              return next;
-            });
-          } else if (event.type === "sources") {
-            setMessages(prev => {
-              const next = [...prev];
-              const last = { ...next[next.length - 1] };
-              last.cited_sources = event.data;
-              next[next.length - 1] = last;
-              return next;
-            });
-          }
-        }
+      if (!res.ok) {
+        const d = await res.json();
+        throw new Error(d.detail ?? `HTTP ${res.status}`);
       }
-    } catch (err) {
-      console.error(err);
+
+      await consumeSse(res, event => {
+        if (event.type === "token") {
+          setMessages(prev => {
+            const next = [...prev];
+            const last = { ...next[next.length - 1] };
+            last.content += event.data as string;
+            next[next.length - 1] = last;
+            return next;
+          });
+
+        } else if (event.type === "sources") {
+          setMessages(prev => {
+            const next = [...prev];
+            const last = { ...next[next.length - 1] };
+            last.cited_sources = event.data as Source[];
+            next[next.length - 1] = last;
+            return next;
+          });
+
+        } else if (event.type === "done") {
+          setMessages(prev => {
+            const next = [...prev];
+            const last = { ...next[next.length - 1] };
+            last.isStreaming = false;
+            next[next.length - 1] = last;
+            return next;
+          });
+
+        } else if (event.type === "error") {
+          // Typed pipeline error — show in message bubble AND banner
+          const errMsg = event.data as string;
+          setChatError(errMsg);
+          setMessages(prev => {
+            const next = [...prev];
+            const last = { ...next[next.length - 1] };
+            last.isStreaming = false;
+            last.error = errMsg;
+            // Preserve any partial content that arrived before the error
+            next[next.length - 1] = last;
+            return next;
+          });
+        }
+      });
+
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Connection failed.";
+      setChatError(msg);
       setMessages(prev => {
         const next = [...prev];
-        next[next.length - 1] = { role: "assistant", content: "Sorry, an error occurred." };
+        const last = { ...next[next.length - 1] };
+        last.isStreaming = false;
+        last.error = msg;
+        next[next.length - 1] = last;
         return next;
       });
     } finally {
@@ -301,48 +401,96 @@ export default function Dashboard() {
     }
   };
 
-  // Helper to render inline citations safely
-  const renderCitedText = (text: string, sources?: Source[]) => {
-    if (!sources || sources.length === 0) return text;
-    
-    const tagMap: Record<string, number> = {};
-    sources.forEach((s, i) => { tagMap[s.tag] = i + 1; });
+  // ── Delete document ───────────────────────────────────────────────────────
+  const handleDeleteDocument = async () => {
+    if (!activeDoc) return;
+    if (!confirm(
+      `Delete "${activeDoc.filename}"?\n\n` +
+      `This removes all chat history and vectors from the database. Cannot be undone.`
+    )) return;
 
-    // Simple replacement for [SOURCE X]
-    const parts = text.split(/(\[SOURCE \d+\])/g);
-    
-    return parts.map((part, i) => {
-      if (part.match(/\[SOURCE \d+\]/)) {
-        const num = tagMap[part];
-        if (!num) return part;
-        const source = sources[num - 1];
-        return (
-          <span 
-            key={i} 
-            title={source.citation}
-            style={{
-              color: "var(--accent-primary)",
-              fontWeight: 600,
-              fontSize: "0.75em",
-              verticalAlign: "super",
-              cursor: "help",
-              borderBottom: "1px dotted var(--accent-primary)",
-              marginLeft: "2px"
-            }}
-          >
-            [{num}]
-          </span>
-        );
-      }
-      return <span key={i}>{part}</span>;
-    });
+    setIsDeleting(true);
+    try {
+      const res = await authFetch(`/history/documents/${activeDoc.id}`, { method: "DELETE" });
+      if (!res.ok) throw new Error("Delete failed.");
+
+      if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+      setActiveDoc(null);
+      setMessages([]);
+      setSummaryTopics([]);
+      setSummaryError(null);
+      setChatError(null);
+      fetchHistory();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Failed to delete document.");
+    } finally {
+      setIsDeleting(false);
+    }
   };
 
+  // ── Inline citation renderer ──────────────────────────────────────────────
+  const renderCitedText = (text: string, sources?: Source[]) => {
+    if (!sources?.length || !text) return <span>{text}</span>;
+
+    // Build a case-insensitive map of tags to source indices
+    const tagMap: Record<string, number> = {};
+    sources.forEach((s, i) => { 
+      tagMap[s.tag.toLowerCase().trim()] = i + 1; 
+    });
+
+    // Split text by [SOURCE N] or [source n]
+    const parts = text.split(/(\[source \d+\]|\[SOURCE \d+\])/gi);
+
+    return (
+      <>
+        {parts.map((part, i) => {
+          const key = part.toLowerCase().trim();
+          const num = tagMap[key];
+          
+          if (!num) return <span key={i}>{part}</span>;
+          
+          const src = sources[num - 1];
+          return (
+            <span
+              key={i}
+              title={src.citation}
+              style={{
+                color: "var(--accent-primary)",
+                fontWeight: 700,
+                fontSize: "0.8em",
+                verticalAlign: "super",
+                cursor: "help",
+                marginLeft: "2px",
+                padding: "0 2px",
+                borderBottom: "1px solid var(--accent-primary)"
+              }}
+            >
+              [{num}]
+            </span>
+          );
+        })}
+      </>
+    );
+  };
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Render
+  // ─────────────────────────────────────────────────────────────────────────
   return (
     <div className="layout-container">
-      
+
       {/* ── Sidebar ── */}
-      <aside className="sidebar" style={{ transform: isSidebarOpen ? "translateX(0)" : "translateX(-100%)", transition: "transform 0.3s ease", position: "absolute", height: "100%", zIndex: 50, left: 0 }}>
+      <aside
+        className="sidebar"
+        style={{
+          transform: isSidebarOpen ? "translateX(0)" : "translateX(-100%)",
+          transition: "transform 0.3s ease",
+          position: "absolute",
+          height: "100%",
+          zIndex: 50,
+          left: 0,
+        }}
+      >
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "2rem" }}>
           <h2 className="heading-gradient" style={{ fontSize: "1.25rem", fontWeight: 700 }}>TOS Summarizer</h2>
           <button onClick={() => setSidebarOpen(false)} style={{ color: "var(--text-muted)" }}>
@@ -351,23 +499,31 @@ export default function Dashboard() {
         </div>
 
         <div style={{ flex: 1, overflowY: "auto" }}>
-          <div style={{ marginBottom: "2rem" }}>
-            <h3 style={{ fontSize: "0.75rem", textTransform: "uppercase", color: "var(--text-muted)", letterSpacing: "0.05em", marginBottom: "1rem" }}>
-              My Documents
-            </h3>
-            
-            <button 
-              className="btn btn-secondary" 
-              style={{ width: "100%", justifyContent: "flex-start", marginBottom: "1rem" }}
-              onClick={() => { setActiveDoc(null); setSidebarOpen(false); }}
-            >
-              + New Document
-            </button>
+          <h3 style={{ fontSize: "0.75rem", textTransform: "uppercase", color: "var(--text-muted)", letterSpacing: "0.05em", marginBottom: "1rem" }}>
+            My Documents
+          </h3>
 
-            <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
-              {historyDocs.map(doc => (
-                <button 
-                  key={doc.id}
+          <button
+            className="btn btn-secondary"
+            style={{ width: "100%", justifyContent: "flex-start", marginBottom: "1rem" }}
+            onClick={() => { setActiveDoc(null); setSummaryTopics([]); setMessages([]); setSidebarOpen(false); }}
+          >
+            + New Document
+          </button>
+
+          <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+            {historyDocs.map(doc => (
+              <div
+                key={doc.id}
+                className="group"
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "0.25rem",
+                  width: "100%",
+                }}
+              >
+                <button
                   onClick={() => { loadPastDocument(doc); setSidebarOpen(false); }}
                   style={{
                     display: "flex",
@@ -379,23 +535,43 @@ export default function Dashboard() {
                     border: activeDoc?.id === doc.id ? "1px solid rgba(59, 130, 246, 0.3)" : "1px solid transparent",
                     textAlign: "left",
                     color: activeDoc?.id === doc.id ? "white" : "var(--text-secondary)",
-                    transition: "all 0.2s"
+                    transition: "all 0.2s",
+                    flex: 1,
+                    minWidth: 0,
                   }}
                 >
-                  <FileText size={16} style={{ color: activeDoc?.id === doc.id ? "var(--accent-primary)" : "var(--text-muted)" }} />
+                  <FileText size={16} style={{ color: activeDoc?.id === doc.id ? "var(--accent-primary)" : "var(--text-muted)", flexShrink: 0 }} />
                   <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                     <div style={{ fontSize: "0.875rem", fontWeight: 500 }}>{doc.filename}</div>
                     <div style={{ fontSize: "0.75rem", opacity: 0.7 }}>{doc.service_name}</div>
                   </div>
                 </button>
-              ))}
-            </div>
+                <button
+                  onClick={(e) => { e.stopPropagation(); setActiveDoc(doc); handleDeleteDocument(); }}
+                  className="opacity-0 group-hover:opacity-100 transition-opacity"
+                  style={{
+                    padding: "0.5rem",
+                    color: "var(--text-muted)",
+                    background: "transparent",
+                    border: "none",
+                  }}
+                  onMouseEnter={e => (e.currentTarget.style.color = "#ef4444")}
+                  onMouseLeave={e => (e.currentTarget.style.color = "var(--text-muted)")}
+                >
+                  <Trash2 size={14} />
+                </button>
+              </div>
+            ))}
           </div>
         </div>
 
         <div style={{ borderTop: "var(--glass-border)", paddingTop: "1.5rem", marginTop: "auto" }}>
           <div style={{ display: "flex", alignItems: "center", gap: "0.75rem", marginBottom: "1rem" }}>
-            <div style={{ width: "32px", height: "32px", borderRadius: "50%", background: "var(--gradient-brand)", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: "bold" }}>
+            <div style={{
+              width: "32px", height: "32px", borderRadius: "50%",
+              background: "var(--gradient-brand)",
+              display: "flex", alignItems: "center", justifyContent: "center", fontWeight: "bold",
+            }}>
               {userEmail.charAt(0).toUpperCase()}
             </div>
             <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: "0.875rem" }}>
@@ -408,46 +584,133 @@ export default function Dashboard() {
         </div>
       </aside>
 
-      {/* ── Main Content ── */}
+      {/* ── Main ── */}
       <main className="main-content" style={{ marginLeft: isSidebarOpen ? "320px" : "0", transition: "margin-left 0.3s ease" }}>
-        
-        {/* Top Navbar */}
-        <header style={{ height: "64px", borderBottom: "var(--glass-border)", display: "flex", alignItems: "center", padding: "0 2rem", background: "rgba(10, 10, 15, 0.8)", backdropFilter: "blur(12px)", position: "sticky", top: 0, zIndex: 40 }}>
+
+        {/* Header */}
+        <header style={{
+          height: "64px", borderBottom: "var(--glass-border)",
+          display: "flex", alignItems: "center", padding: "0 2rem",
+          background: "rgba(10, 10, 15, 0.8)", backdropFilter: "blur(12px)",
+          position: "sticky", top: 0, zIndex: 40,
+        }}>
           {!isSidebarOpen && (
             <button onClick={() => setSidebarOpen(true)} style={{ marginRight: "1rem", color: "var(--text-muted)" }}>
               <Menu size={20} />
             </button>
           )}
           {activeDoc ? (
-            <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-              <span style={{ color: "var(--text-muted)" }}>Analyzing:</span>
-              <span style={{ fontWeight: 600, color: "white" }}>{activeDoc.filename}</span>
-              <span style={{ fontSize: "0.75rem", padding: "0.25rem 0.5rem", background: "rgba(59, 130, 246, 0.1)", color: "var(--accent-primary)", borderRadius: "1rem", marginLeft: "0.5rem" }}>
-                {activeDoc.service_name}
-              </span>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                <span style={{ color: "var(--text-muted)" }}>Analyzing:</span>
+                <span style={{ fontWeight: 600, color: "white" }}>{activeDoc.filename}</span>
+                <span style={{
+                  fontSize: "0.75rem", padding: "0.25rem 0.5rem",
+                  background: "rgba(59, 130, 246, 0.1)", color: "var(--accent-primary)",
+                  borderRadius: "1rem", marginLeft: "0.5rem",
+                }}>
+                  {activeDoc.service_name}
+                </span>
+              </div>
+              <button
+                onClick={handleDeleteDocument}
+                disabled={isDeleting}
+                style={{
+                  display: "flex", alignItems: "center", gap: "0.5rem",
+                  color: "var(--text-muted)", fontSize: "0.875rem",
+                  background: "transparent", border: "none", cursor: "pointer",
+                  opacity: isDeleting ? 0.5 : 1, transition: "color 0.2s",
+                }}
+                onMouseEnter={e => (e.currentTarget.style.color = "#ef4444")}
+                onMouseLeave={e => (e.currentTarget.style.color = "var(--text-muted)")}
+              >
+                {isDeleting ? <Loader2 className="spinner" size={16} /> : <Trash2 size={16} />}
+                Delete
+              </button>
             </div>
           ) : (
             <span style={{ fontWeight: 600, color: "white" }}>Upload Document</span>
           )}
         </header>
+        
+        {/* Toggle Bar */}
+        {activeDoc && (
+          <div style={{
+            display: "flex",
+            justifyContent: "center",
+            padding: "1rem 0",
+            background: "rgba(10, 10, 15, 0.4)",
+            borderBottom: "1px solid rgba(255,255,255,0.05)"
+          }}>
+            <div style={{
+              display: "flex",
+              background: "rgba(0,0,0,0.3)",
+              padding: "4px",
+              borderRadius: "12px",
+              border: "1px solid rgba(255,255,255,0.05)"
+            }}>
+              <button 
+                onClick={() => setActiveTab("summary")}
+                style={{
+                  padding: "8px 24px",
+                  borderRadius: "8px",
+                  fontSize: "0.875rem",
+                  fontWeight: 600,
+                  transition: "all 0.2s",
+                  background: activeTab === "summary" ? "var(--gradient-brand)" : "transparent",
+                  color: activeTab === "summary" ? "white" : "var(--text-muted)",
+                  border: "none",
+                  cursor: "pointer"
+                }}
+              >
+                Analysis View
+              </button>
+              <button 
+                onClick={() => setActiveTab("chat")}
+                style={{
+                  padding: "8px 24px",
+                  borderRadius: "8px",
+                  fontSize: "0.875rem",
+                  fontWeight: 600,
+                  transition: "all 0.2s",
+                  background: activeTab === "chat" ? "var(--gradient-brand)" : "transparent",
+                  color: activeTab === "chat" ? "white" : "var(--text-muted)",
+                  border: "none",
+                  cursor: "pointer"
+                }}
+              >
+                Interactive Chat
+              </button>
+            </div>
+          </div>
+        )}
 
-        {/* Content Area */}
+        {/* Content */}
         <div style={{ flex: 1, overflowY: "auto", padding: "2rem" }}>
-          
+
           {!activeDoc ? (
-            /* Upload State */
+
+            /* ── Upload view ── */
             <div style={{ maxWidth: "600px", margin: "4rem auto 0" }}>
               <div className="glass-card" style={{ textAlign: "center", padding: "4rem 2rem" }}>
                 <div style={{ display: "inline-flex", padding: "1rem", background: "rgba(59, 130, 246, 0.1)", borderRadius: "50%", marginBottom: "1.5rem" }}>
                   <Upload size={32} color="var(--accent-primary)" />
                 </div>
                 <h2 style={{ fontSize: "1.5rem", fontWeight: 600, marginBottom: "0.5rem" }}>Upload a Legal Document</h2>
-                <p className="text-muted" style={{ marginBottom: "2rem" }}>We'll index the document into our vector database and prepare the AI.</p>
-                
+                <p className="text-muted" style={{ marginBottom: "2rem" }}>
+                  We'll index your document and prepare the AI for analysis.
+                </p>
+
                 <form onSubmit={handleUpload} style={{ textAlign: "left" }}>
                   <div className="input-group">
                     <label className="input-label">Service Name (e.g. Spotify, Apple)</label>
-                    <input type="text" className="input-field" value={serviceName} onChange={e => setServiceName(e.target.value)} required />
+                    <input
+                      type="text"
+                      className="input-field"
+                      value={serviceName}
+                      onChange={e => setServiceName(e.target.value)}
+                      required
+                    />
                   </div>
                   <div className="input-group">
                     <label className="input-label">Document Type</label>
@@ -460,195 +723,249 @@ export default function Dashboard() {
                   </div>
                   <div className="input-group">
                     <label className="input-label">PDF File</label>
-                    <input 
-                      type="file" 
-                      accept=".pdf" 
-                      className="input-field" 
-                      onChange={e => setFile(e.target.files?.[0] || null)} 
-                      required 
+                    <input
+                      type="file"
+                      accept=".pdf"
+                      className="input-field"
+                      onChange={e => setFile(e.target.files?.[0] ?? null)}
+                      required
                       style={{ padding: "0.5rem", background: "rgba(255,255,255,0.02)" }}
                     />
                   </div>
-                  
-                  <button type="submit" className="btn btn-primary" style={{ width: "100%", marginTop: "1rem" }} disabled={isUploading}>
-                    {isUploading ? <><Loader2 className="spinner" size={18} /> Uploading...</> : "Ingest Document"}
+                  <button
+                    type="submit"
+                    className="btn btn-primary"
+                    style={{ width: "100%", marginTop: "1rem" }}
+                    disabled={isUploading}
+                  >
+                    {isUploading
+                      ? <><Loader2 className="spinner" size={18} /> Uploading…</>
+                      : "Ingest Document"
+                    }
                   </button>
                 </form>
               </div>
             </div>
+
           ) : (
-            /* Active Document State (Two Columns: Summary & Chat) */
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "2rem", height: "calc(100vh - 128px)" }}>
-              
-              {/* Left Column: Summary */}
-              <div style={{ display: "flex", flexDirection: "column", gap: "1.5rem", overflowY: "auto", paddingRight: "1rem" }}>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                  <h2 style={{ fontSize: "1.25rem", fontWeight: 600, display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                    <Search size={20} color="var(--accent-primary)" /> Global Summary
-                  </h2>
-                  <button 
-                    className="btn btn-secondary" 
-                    style={{ padding: "0.5rem 1rem", fontSize: "0.75rem" }}
-                    onClick={handleGenerateSummary}
-                    disabled={isSummarizing || docStatus === "processing"}
-                  >
-                    {isSummarizing ? <><Loader2 className="spinner" size={14} /> Analyzing...</> : "Generate Summary"}
-                  </button>
-                </div>
 
-                {/* Status banner when processing */}
-                {docStatus === "processing" && (
-                  <div style={{ padding: "1rem", background: "rgba(251,191,36,0.08)", border: "1px solid rgba(251,191,36,0.2)", borderRadius: "0.75rem", display: "flex", alignItems: "center", gap: "0.75rem" }}>
-                    <Loader2 className="spinner" size={18} color="#fbbf24" />
-                    <span style={{ fontSize: "0.875rem", color: "#fbbf24" }}>Indexing document in background… This may take a minute.</span>
-                  </div>
-                )}
-                
-                {summaryTopics.length === 0 && !isSummarizing && docStatus !== "processing" && (
-                  <div className="glass-card" style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "4rem 2rem", opacity: 0.7 }}>
-                    <Info size={32} color="var(--text-muted)" style={{ marginBottom: "1rem" }} />
-                    <p style={{ textAlign: "center", color: "var(--text-secondary)" }}>Click generate to extract key clauses across 12 legal topics.</p>
-                  </div>
-                )}
-                
-                {summaryTopics.map((topic: any, idx: number) => (
-                  <div key={idx} className="glass-card" style={{ padding: "1.5rem", animation: "fadeIn 0.4s ease-out" }}>
-                    <h3 style={{ fontSize: "1rem", fontWeight: 600, marginBottom: "0.75rem", color: topic.summary.includes("NOT_IN_DOCUMENT") ? "var(--text-muted)" : "white" }}>
-                      {topic.label}
-                    </h3>
-                    <p style={{ fontSize: "0.875rem", color: "var(--text-secondary)", lineHeight: 1.6 }}>
-                      {topic.summary.includes("NOT_IN_DOCUMENT") 
-                        ? "This topic is not explicitly covered in the provided text." 
-                        : renderCitedText(topic.summary, topic.sources)
+            /* ── Active document view ── */
+            <div style={{ height: "calc(100vh - 180px)", display: "flex", flexDirection: "column" }}>
+              
+              {activeTab === "summary" ? (
+                /* ── Analysis View ── */
+                <div style={{ 
+                  display: "flex", flexDirection: "column", gap: "1.5rem", 
+                  overflowY: "auto", paddingRight: "1rem", maxWidth: "1000px", 
+                  margin: "0 auto", width: "100%" 
+                }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <h2 style={{ fontSize: "1.25rem", fontWeight: 600, display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                      <Search size={20} color="var(--accent-primary)" /> Key Clause Analysis
+                    </h2>
+                    <button
+                      className="btn btn-secondary"
+                      style={{ padding: "0.5rem 1rem", fontSize: "0.75rem" }}
+                      onClick={handleGenerateSummary}
+                      disabled={isSummarizing || docStatus === "processing"}
+                    >
+                      {isSummarizing
+                        ? <><Loader2 className="spinner" size={14} /> Analyzing…</>
+                        : summaryTopics.length > 0 ? "Refresh Analysis" : "Generate Analysis"
                       }
-                    </p>
-                    
-                    {topic.sources && topic.sources.length > 0 && (
-                      <div style={{ marginTop: "1rem", borderTop: "1px solid rgba(255,255,255,0.05)", paddingTop: "1rem" }}>
-                        <p style={{ fontSize: "0.75rem", fontWeight: 600, marginBottom: "0.5rem", color: "var(--text-muted)" }}>CITED SOURCES</p>
-                        <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
-                          {topic.sources.map((src: Source, sIdx: number) => (
-                            <div key={sIdx} style={{ padding: "0.75rem", background: "rgba(0,0,0,0.2)", borderRadius: "0.5rem", border: "1px solid rgba(255,255,255,0.03)" }}>
-                              <div style={{ fontSize: "0.75rem", color: "var(--accent-primary)", marginBottom: "0.25rem", fontWeight: 500 }}>
-                                [{sIdx + 1}] {src.citation} {src.section ? `· ${src.section}` : ""}
-                              </div>
-                              <div style={{ fontSize: "0.75rem", color: "var(--text-muted)", fontStyle: "italic" }}>
-                                "{src.excerpt}"
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    )}
+                    </button>
                   </div>
-                ))}
 
-                {/* Skeleton card while more topics are being generated */}
-                {isSummarizing && (
-                  <div className="glass-card" style={{ padding: "1.5rem", opacity: 0.5 }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
-                      <Loader2 className="spinner" size={16} color="var(--accent-primary)" />
-                      <span style={{ fontSize: "0.875rem", color: "var(--text-secondary)" }}>Analyzing next topic…</span>
-                    </div>
-                  </div>
-                )}
-              </div>
-              
-              {/* Right Column: Chat */}
-              <div className="glass-card" style={{ display: "flex", flexDirection: "column", padding: "1rem", overflow: "hidden" }}>
-                <div style={{ padding: "1rem", borderBottom: "1px solid rgba(255,255,255,0.05)" }}>
-                  <h2 style={{ fontSize: "1.25rem", fontWeight: 600 }}>Chat Interface</h2>
-                  <p className="text-muted" style={{ fontSize: "0.75rem" }}>Ask specific questions about the document.</p>
-                </div>
-                
-                <div style={{ flex: 1, overflowY: "auto", padding: "1.5rem", display: "flex", flexDirection: "column", gap: "1.5rem" }}>
-                  {messages.length === 0 && (
-                    <div style={{ margin: "auto", textAlign: "center", color: "var(--text-muted)" }}>
-                      <p>No messages yet. Ask a question below!</p>
+                  {/* Processing banner */}
+                  {docStatus === "processing" && (
+                    <div style={{
+                      padding: "1rem", background: "rgba(251,191,36,0.08)",
+                      border: "1px solid rgba(251,191,36,0.2)", borderRadius: "0.75rem",
+                      display: "flex", alignItems: "center", gap: "0.75rem",
+                    }}>
+                      <Loader2 className="spinner" size={18} color="#fbbf24" />
+                      <span style={{ fontSize: "0.875rem", color: "#fbbf24" }}>
+                        Indexing document in background… This may take a minute.
+                      </span>
                     </div>
                   )}
-                  
-                  {messages.map((msg, idx) => (
-                    <div key={idx} style={{ 
-                      display: "flex", 
-                      flexDirection: "column",
-                      alignItems: msg.role === "user" ? "flex-end" : "flex-start",
-                      animation: "fadeIn 0.3s ease-out"
-                    }}>
-                      <div style={{ 
-                        maxWidth: "85%",
-                        padding: "1rem 1.25rem", 
-                        borderRadius: "1rem",
-                        background: msg.role === "user" ? "var(--gradient-brand)" : "rgba(255,255,255,0.05)",
-                        border: msg.role === "assistant" ? "1px solid rgba(255,255,255,0.1)" : "none",
-                        color: "white",
-                        fontSize: "0.875rem",
-                        lineHeight: 1.6
+
+                  {summaryTopics.length === 0 && !isSummarizing && !summaryError && docStatus !== "processing" && (
+                    <div className="glass-card" style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "4rem 2rem", opacity: 0.7 }}>
+                      <Info size={32} color="var(--text-muted)" style={{ marginBottom: "1rem" }} />
+                      <p style={{ textAlign: "center", color: "var(--text-secondary)" }}>
+                        Click generate to extract key clauses across 12 legal topics.
+                      </p>
+                    </div>
+                  )}
+
+                  {summaryTopics.map((topic, idx) => (
+                    <div key={idx} className="glass-card" style={{ padding: "1.5rem", animation: "fadeIn 0.4s ease-out" }}>
+                      <h3 style={{ 
+                        fontSize: "1rem", fontWeight: 600, marginBottom: "0.75rem",
+                        color: topic.summary.includes("NOT_IN_DOCUMENT") ? "var(--text-muted)" : "white"
                       }}>
-                        {msg.role === "assistant" ? renderCitedText(msg.content, msg.cited_sources) : msg.content}
-                      </div>
+                        {topic.label}
+                      </h3>
+                      <p style={{ fontSize: "0.875rem", color: "var(--text-secondary)", lineHeight: 1.6 }}>
+                        {topic.summary.includes("NOT_IN_DOCUMENT")
+                          ? "This topic is not explicitly covered in the provided text."
+                          : renderCitedText(topic.summary, topic.sources)
+                        }
+                      </p>
                       
-                      {/* Show sources directly under assistant messages if available */}
-                      {msg.role === "assistant" && msg.cited_sources && msg.cited_sources.length > 0 && (
-                        <div style={{ marginTop: "0.5rem", width: "85%", display: "flex", flexDirection: "column", gap: "0.5rem" }}>
-                          {msg.cited_sources.map((src, sIdx) => (
-                            <details key={sIdx} style={{ fontSize: "0.75rem", background: "rgba(0,0,0,0.2)", padding: "0.5rem", borderRadius: "0.5rem", color: "var(--text-muted)" }}>
-                              <summary style={{ cursor: "pointer", color: "var(--text-secondary)", fontWeight: 500 }}>
-                                [{sIdx + 1}] {src.citation}
-                              </summary>
-                              <div style={{ marginTop: "0.5rem", paddingLeft: "1rem", borderLeft: "2px solid rgba(255,255,255,0.1)" }}>
-                                {src.excerpt}
-                              </div>
-                            </details>
-                          ))}
+                      {topic.sources && topic.sources.length > 0 && (
+                        <div style={{ marginTop: "1rem", display: "flex", flexDirection: "column", gap: "0.4rem" }}>
+                          <p style={{ fontSize: "0.7rem", color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: "0.25rem" }}>
+                            Source Passages
+                          </p>
+                          {topic.sources.map((src, sIdx) => {
+                            const pageLabel = `Page ${src.page}`;
+                            const sectionLabel = src.section && src.section !== "General" ? src.section : null;
+                            const preview = src.excerpt ? src.excerpt.replace(/\s+/g, " ").trim().slice(0, 80) + "…" : "";
+                            return (
+                              <details key={sIdx} style={{ background: "rgba(59,130,246,0.05)", borderRadius: "0.5rem", border: "1px solid rgba(59,130,246,0.15)", overflow: "hidden" }}>
+                                <summary style={{ cursor: "pointer", padding: "0.5rem 0.75rem", display: "flex", alignItems: "center", gap: "0.5rem", listStyle: "none" }}>
+                                  <span style={{ background: "rgba(59,130,246,0.2)", color: "var(--accent-primary)", fontWeight: 700, fontSize: "0.7rem", padding: "1px 6px", borderRadius: "4px", flexShrink: 0 }}>
+                                    {pageLabel}
+                                  </span>
+                                  {sectionLabel && (
+                                    <span style={{ fontSize: "0.7rem", color: "var(--text-muted)", background: "rgba(255,255,255,0.05)", padding: "1px 6px", borderRadius: "4px", flexShrink: 0 }}>
+                                      {sectionLabel}
+                                    </span>
+                                  )}
+                                  <span style={{ fontSize: "0.72rem", color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                    {preview}
+                                  </span>
+                                </summary>
+                                <div style={{ padding: "0.75rem 1rem", borderTop: "1px solid rgba(59,130,246,0.1)", fontSize: "0.8rem", color: "var(--text-secondary)", lineHeight: 1.6, fontStyle: "italic" }}>
+                                  &ldquo;{src.excerpt}&rdquo;
+                                </div>
+                              </details>
+                            );
+                          })}
                         </div>
                       )}
                     </div>
                   ))}
-                  
-                  {isChatting && (
-                    <div style={{ display: "flex", alignItems: "flex-start" }}>
-                      <div style={{ padding: "1rem 1.25rem", borderRadius: "1rem", background: "rgba(255,255,255,0.05)", display: "flex", gap: "0.5rem" }}>
-                        <span className="spinner" style={{ width: "8px", height: "8px", background: "var(--accent-primary)", borderRadius: "50%" }}></span>
-                        <span className="spinner" style={{ width: "8px", height: "8px", background: "var(--accent-primary)", borderRadius: "50%", animationDelay: "0.2s" }}></span>
-                        <span className="spinner" style={{ width: "8px", height: "8px", background: "var(--accent-primary)", borderRadius: "50%", animationDelay: "0.4s" }}></span>
+
+                  {isSummarizing && (
+                    <div className="glass-card" style={{ padding: "1.5rem", opacity: 0.5 }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
+                        <Loader2 className="spinner" size={16} color="var(--accent-primary)" />
+                        <span style={{ fontSize: "0.875rem", color: "var(--text-secondary)" }}>Analyzing next topic…</span>
                       </div>
                     </div>
                   )}
-                  <div ref={chatEndRef} />
                 </div>
-                
-                <form onSubmit={handleSendMessage} style={{ marginTop: "auto", paddingTop: "1rem" }}>
-                  <div style={{ position: "relative" }}>
-                    <input 
-                      type="text" 
-                      className="input-field" 
-                      placeholder={isSummarizing ? "AI is busy generating summary..." : "Ask about data sharing, refunds, governing law..."}
+              ) : (
+                /* ── Chat View ── */
+                <div className="glass-card" style={{ 
+                  flex: 1, display: "flex", flexDirection: "column", 
+                  padding: "1rem", overflow: "hidden", maxWidth: "900px", 
+                  margin: "0 auto", width: "100%" 
+                }}>
+                  <div style={{ 
+                    flex: 1, overflowY: "auto", padding: "1.5rem", 
+                    display: "flex", flexDirection: "column", gap: "1.5rem" 
+                  }}>
+                    {messages.length === 0 && (
+                      <div style={{ margin: "auto", textAlign: "center", color: "var(--text-muted)" }}>
+                        <p>No messages yet. Ask a question about this document!</p>
+                      </div>
+                    )}
+
+                    {messages.map((msg, idx) => (
+                      <div 
+                        key={idx} 
+                        style={{ 
+                          display: "flex", flexDirection: "column", 
+                          alignItems: msg.role === "user" ? "flex-end" : "flex-start", 
+                          animation: "fadeIn 0.3s ease-out" 
+                        }}
+                      >
+                        <div style={{
+                          maxWidth: "85%",
+                          padding: "1rem 1.25rem",
+                          borderRadius: "1rem",
+                          background: msg.role === "user" ? "var(--gradient-brand)" : "rgba(255,255,255,0.05)",
+                          color: "white",
+                          boxShadow: msg.role === "user" ? "0 4px 12px rgba(59, 130, 246, 0.2)" : "none",
+                          fontSize: "0.9375rem",
+                          lineHeight: 1.5,
+                        }}>
+                          {renderCitedText(msg.content, msg.cited_sources)}
+                        </div>
+
+                        {/* Source expanders under assistant messages */}
+                        {msg.role === "assistant" && msg.cited_sources && msg.cited_sources.length > 0 && (
+                          <div style={{ marginTop: "0.5rem", width: "88%", display: "flex", flexDirection: "column", gap: "0.4rem" }}>
+                            <p style={{ fontSize: "0.68rem", color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: "0.1rem" }}>
+                              Sources
+                            </p>
+                            {msg.cited_sources.map((src, sIdx) => {
+                              const pageLabel = `Page ${src.page}`;
+                              const sectionLabel = src.section && src.section !== "General" ? src.section : null;
+                              const preview = src.excerpt ? src.excerpt.replace(/\s+/g, " ").trim().slice(0, 80) + "…" : "";
+                              return (
+                                <details key={sIdx} style={{ background: "rgba(59,130,246,0.05)", borderRadius: "0.5rem", border: "1px solid rgba(59,130,246,0.15)", overflow: "hidden" }}>
+                                  <summary style={{ cursor: "pointer", padding: "0.5rem 0.75rem", display: "flex", alignItems: "center", gap: "0.5rem", listStyle: "none" }}>
+                                    <span style={{ background: "rgba(59,130,246,0.2)", color: "var(--accent-primary)", fontWeight: 700, fontSize: "0.7rem", padding: "1px 6px", borderRadius: "4px", flexShrink: 0 }}>
+                                      {pageLabel}
+                                    </span>
+                                    {sectionLabel && (
+                                      <span style={{ fontSize: "0.7rem", color: "var(--text-muted)", background: "rgba(255,255,255,0.05)", padding: "1px 6px", borderRadius: "4px", flexShrink: 0 }}>
+                                        {sectionLabel}
+                                      </span>
+                                    )}
+                                    <span style={{ fontSize: "0.72rem", color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                      {preview}
+                                    </span>
+                                  </summary>
+                                  <div style={{ padding: "0.75rem 1rem", borderTop: "1px solid rgba(59,130,246,0.1)", fontSize: "0.8rem", color: "var(--text-secondary)", lineHeight: 1.6, fontStyle: "italic" }}>
+                                    &ldquo;{src.excerpt}&rdquo;
+                                  </div>
+                                </details>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                    <div ref={chatEndRef} />
+                  </div>
+
+                  {/* Chat Input */}
+                  <form 
+                    onSubmit={handleSendMessage} 
+                    style={{ 
+                      display: "flex", gap: "1rem", padding: "1.5rem", 
+                      borderTop: "1px solid rgba(255,255,255,0.05)" 
+                    }}
+                  >
+                    <input
+                      type="text"
+                      className="input-field"
+                      placeholder="Ask a specific question..."
                       value={chatInput}
                       onChange={e => setChatInput(e.target.value)}
-                      disabled={isChatting || isSummarizing}
-                      style={{ paddingRight: "3rem", background: "rgba(0,0,0,0.3)" }}
+                      disabled={isChatting}
                     />
                     <button 
                       type="submit" 
-                      disabled={isChatting || isSummarizing || !chatInput.trim()}
-                      style={{ 
-                        position: "absolute", right: "0.5rem", top: "50%", transform: "translateY(-50%)",
-                        background: chatInput.trim() && !isSummarizing ? "var(--accent-primary)" : "transparent",
-                        color: chatInput.trim() && !isSummarizing ? "white" : "var(--text-muted)",
-                        padding: "0.4rem", borderRadius: "0.375rem", transition: "all 0.2s"
-                      }}
+                      className="btn btn-primary" 
+                      disabled={isChatting || !chatInput.trim()}
+                      style={{ padding: "0.75rem" }}
                     >
-                      <Send size={16} />
+                      {isChatting ? <Loader2 className="spinner" size={18} /> : <Send size={18} />}
                     </button>
+                  </form>
                   </div>
-                </form>
+                )}
               </div>
-
-            </div>
-          )}
-        </div>
-      </main>
-    </div>
-  );
+            )}
+          </div>
+        </main>
+      </div>
+    );
 }
