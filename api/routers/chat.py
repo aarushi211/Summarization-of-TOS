@@ -1,3 +1,7 @@
+"""
+api/routers/chat.py
+"""
+
 import json
 import logging
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -5,7 +9,8 @@ from fastapi.responses import StreamingResponse
 from postgrest.exceptions import APIError as SupabaseAPIError
 
 from api.core import database
-from api.core.security import get_current_user, limiter
+from api.core.config import settings
+from api.core.security import get_current_user
 from api.schemas.chat import ChatRequest
 from src.RAG.schemas import SessionState
 
@@ -20,19 +25,7 @@ def _sse(data: dict) -> str:
 def _get_state(request: Request, user_id: str, doc_id: str) -> SessionState:
     """
     Build a SessionState for this request.
-
-    ── FIX: Replace bare `except: pass` with specific exception handling. ────
-    The original code silently swallowed every exception here, including
-    programming errors, auth failures, and network timeouts. The bare except
-    made it impossible to distinguish "document metadata not found" (expected)
-    from "Supabase is down" (needs alerting).
-
-    Now we catch only the exceptions we expect:
-    - SupabaseAPIError: the row doesn't exist or RLS blocked the query. Fine —
-      we proceed with default state values.
-    - Exception: anything else (network timeout, auth error) is logged as a
-      warning with the request_id so it shows up in Cloud Logging, but we
-      still continue rather than crashing the request.
+    In desktop mode, user_id is always "local-user" — no auth needed.
     """
     rid = getattr(request.state, "request_id", "-")
     namespace = f"{user_id}_{doc_id}".replace("-", "_")
@@ -53,19 +46,37 @@ def _get_state(request: Request, user_id: str, doc_id: str) -> SessionState:
         if res.data:
             state.service_name = res.data.get("service_name", "Unknown")
             state.doc_type = res.data.get("doc_type", "Terms")
-    except SupabaseAPIError:
-        # Row not found or RLS denied — not an error, just use defaults
-        pass
+    except (SupabaseAPIError, Exception) as e:
+        # SupabaseAPIError = row not found (expected in desktop SQLite too)
+        # Any other exception = log with context but don't crash the request
+        is_not_found = isinstance(e, SupabaseAPIError)
+        if not is_not_found:
+            logger.warning(
+                "could not fetch document metadata",
+                extra={"request_id": rid, "document_id": doc_id},
+                exc_info=True,
+            )
+
+    return state
+
+
+def _try_save(rid: str, doc_id: str, row: dict, context: str):
+    """
+    Helper to persist a DB row with structured error logging.
+    Shared by both summary and chat generators to avoid duplication.
+    """
+    try:
+        table = "summaries" if "topic_label" in row else "chats"
+        database.supa_admin.table(table).insert(row).execute()
     except Exception:
-        # Unexpected error (network, auth) — log it but don't crash the request
-        logger.warning(
-            "could not fetch document metadata",
+        logger.error(
+            "failed to persist %s", context,
             extra={"request_id": rid, "document_id": doc_id},
             exc_info=True,
         )
 
-    return state
 
+# ── Summary stream ────────────────────────────────────────────────────────────
 
 @router.get("/summary/{document_id}")
 async def get_summary(
@@ -80,42 +91,38 @@ async def get_summary(
     state = _get_state(request, user["user_id"], document_id)
 
     async def summary_gen():
-        for msg in database.shared_assistant.generate_global_summary_stream(state):
-            if msg["type"] == "topic_ready" and database.supa_admin:
-                data = msg["data"]
-                try:
-                    database.supa_admin.table("summaries").insert({
+        # ── Streaming error boundary ──────────────────────────────────────────
+        # If the generator raises mid-stream (model crash, OOM, etc.) we catch
+        # it here and yield a structured error + done event so the frontend
+        # always receives a terminal message and never hangs waiting.
+        try:
+            for msg in database.shared_assistant.generate_global_summary_stream(state):
+                if msg["type"] == "topic_ready" and database.supa_admin:
+                    data = msg["data"]
+                    _try_save(rid, document_id, {
                         "document_id": document_id,
                         "user_id": user["user_id"],
                         "topic_label": data["label"],
                         "summary_text": data["summary"],
                         "sources": data["sources"],
-                    }).execute()
-                except SupabaseAPIError as e:
-                    # ── FIX: Log Supabase write failures with request_id. ──
-                    # Previously: logger.error("Failed to save summary: %s", e)
-                    # That log had no request_id, no topic context, and no
-                    # indication of which user was affected. This version gives
-                    # you everything you need to reproduce the failure.
-                    logger.error(
-                        "failed to persist summary topic",
-                        extra={
-                            "request_id": rid,
-                            "document_id": document_id,
-                            "topic": data.get("label"),
-                            "error": str(e),
-                        },
-                    )
-                except Exception:
-                    logger.error(
-                        "unexpected error persisting summary topic",
-                        extra={"request_id": rid, "document_id": document_id},
-                        exc_info=True,
-                    )
-            yield _sse(msg)
+                    }, context=f"summary topic '{data['label']}'")
+                yield _sse(msg)
+
+        except Exception:
+            logger.error(
+                "summary stream failed",
+                extra={"request_id": rid, "document_id": document_id},
+                exc_info=True,
+            )
+            # Always yield error + done so the frontend terminates cleanly.
+            # Without this the client waits until its own timeout fires.
+            yield _sse({"type": "error", "data": "Summary generation failed. Please try again."})
+            yield _sse({"type": "done"})
 
     return StreamingResponse(summary_gen(), media_type="text/event-stream")
 
+
+# ── Chat stream ───────────────────────────────────────────────────────────────
 
 @router.post("/query")
 async def ask_question(
@@ -133,51 +140,52 @@ async def ask_question(
         full_response = ""
         sources = []
 
+        # Persist user message before streaming starts
         if database.supa_admin:
-            try:
-                database.supa_admin.table("chats").insert({
-                    "document_id": req.document_id,
-                    "user_id": user["user_id"],
-                    "role": "user",
-                    "content": req.query,
-                }).execute()
-            except Exception:
-                logger.warning(
-                    "failed to persist user message",
-                    extra={"request_id": rid, "document_id": req.document_id},
-                    exc_info=True,
-                )
+            _try_save(rid, req.document_id, {
+                "document_id": req.document_id,
+                "user_id": user["user_id"],
+                "role": "user",
+                "content": req.query,
+            }, context="user message")
 
-        for msg in database.shared_assistant.answer_question_stream(req.query, state):
-            if msg["type"] == "token":
-                full_response += msg["data"]
-            elif msg["type"] == "sources":
-                sources = msg["data"]
-            elif msg["type"] == "done" and database.supa_admin:
-                try:
-                    database.supa_admin.table("chats").insert({
+        # ── Streaming error boundary ──────────────────────────────────────────
+        # Wrapping the entire generator in try/except means:
+        # - A Pinecone timeout mid-retrieval → clean error to frontend
+        # - An OOM during inference → clean error to frontend
+        # - A programming error → clean error to frontend + full traceback in logs
+        #
+        # Without this, the SSE connection just closes mid-stream. The frontend
+        # (useSseChat.ts) catches the network error but can't show a meaningful
+        # message to the user. With this, it receives {"type":"error","data":"..."}
+        # which the hook already handles correctly (see useSseChat.ts error case).
+        try:
+            for msg in database.shared_assistant.answer_question_stream(req.query, state):
+                if msg["type"] == "token":
+                    full_response += msg["data"]
+                elif msg["type"] == "sources":
+                    sources = msg["data"]
+                elif msg["type"] == "done" and database.supa_admin:
+                    _try_save(rid, req.document_id, {
                         "document_id": req.document_id,
                         "user_id": user["user_id"],
                         "role": "assistant",
                         "content": full_response,
                         "sources": sources,
-                    }).execute()
-                except SupabaseAPIError as e:
-                    logger.error(
-                        "failed to persist assistant response",
-                        extra={
-                            "request_id": rid,
-                            "document_id": req.document_id,
-                            "response_length": len(full_response),
-                            "error": str(e),
-                        },
-                    )
-                except Exception:
-                    logger.error(
-                        "unexpected error persisting assistant response",
-                        extra={"request_id": rid, "document_id": req.document_id},
-                        exc_info=True,
-                    )
-            yield _sse(msg)
+                    }, context="assistant response")
+                yield _sse(msg)
+
+        except Exception:
+            logger.error(
+                "chat stream failed",
+                extra={
+                    "request_id": rid,
+                    "document_id": req.document_id,
+                    "partial_response_len": len(full_response),
+                },
+                exc_info=True,
+            )
+            yield _sse({"type": "error", "data": "AI generation failed. Please try again."})
+            yield _sse({"type": "done"})
 
     return StreamingResponse(chat_gen(), media_type="text/event-stream")

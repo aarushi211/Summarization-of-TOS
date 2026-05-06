@@ -41,42 +41,66 @@ _RETRY_LLM = dict(
 
 class TOSAssistant:
     def __init__(
-        self, 
-        model_path: str, 
-        pinecone_api_key: str,
-        index_name: str = "tos-summarizer",
-        dimension: int = 768,
-        cloud: str = "aws",
-        region: str = "us-east-1"
-    ):
-        self._metrics: list[dict] = []
-        
-        # Pinecone setup
-        self._pc = PineconeClient(api_key=pinecone_api_key)
-        self._index_name = index_name
-        self._dimension = dimension
-        self._ensure_pinecone_index(index_name, cloud, region)
-        self._pc_index = self._pc.Index(index_name)
-        
-        # Load Models
-        self.llm = Llama(model_path=model_path, n_ctx=8192, n_gpu_layers=-1, verbose=False)
-        
+    self,
+    model_path: str,
+    pinecone_api_key: str,
+    index_name: str = "tos-summarizer",
+    dimension: int = 768,
+    cloud: str = "aws",
+    region: str = "us-east-1",
+    # Desktop-only params
+    use_local_vectorstore: bool = False,
+    data_dir: str = "",
+    n_gpu_layers: int = -1,
+):
+         self._metrics: list[dict] = []
+         self._use_local = use_local_vectorstore or not pinecone_api_key
+    
+        from pathlib import Path
         PROJECT_ROOT = Path(model_path).resolve().parent.parent
         local_embed = PROJECT_ROOT / "models" / "embeddings"
         local_cross = PROJECT_ROOT / "models" / "cross-encoder" / "ms-marco-MiniLM-L-6-v2"
-        
+    
+        self.llm = Llama(
+        model_path=model_path,
+        n_ctx=8192,
+        n_gpu_layers=n_gpu_layers,  # was: n_gpu_layers=-1
+        verbose=False,
+        )
         self.embed_model = HuggingFaceEmbeddings(model_name=str(local_embed))
         self.cross_encoder = CrossEncoder(str(local_cross))
-        
-        # Splitters
+    
         self.header_splitter = MarkdownHeaderTextSplitter(
-            headers_to_split_on=[("#", "doc_title"), ("##", "section"), ("###", "subsection"), ("####", "clause")],
-            strip_headers=False
+            headers_to_split_on=[
+                ("#", "doc_title"), ("##", "section"),
+                ("###", "subsection"), ("####", "clause"),
+            ],
+            strip_headers=False,
         )
         self.sub_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=3500, chunk_overlap=700, separators=["\n\n", "\n", ". ", " ", ""]
+            chunk_size=3500, chunk_overlap=700,
+            separators=["\n\n", "\n", ". ", " ", ""],
         )
-
+    
+        if self._use_local:
+            import chromadb
+            from chromadb.config import Settings as ChromaSettings
+            persist_dir = data_dir or str(Path.home() / ".tos-summarizer" / "chroma")
+            Path(persist_dir).mkdir(parents=True, exist_ok=True)
+            self._chroma_client = chromadb.PersistentClient(
+                path=persist_dir,
+                settings=ChromaSettings(anonymized_telemetry=False),
+            )
+            self._chroma_collection_name = index_name
+            logger.info("Desktop mode: ChromaDB at %s", persist_dir)
+        else:
+            self._pc = PineconeClient(api_key=pinecone_api_key)
+            self._index_name = index_name
+            self._dimension = dimension
+            self._ensure_pinecone_index(index_name, cloud, region)
+            self._pc_index = self._pc.Index(index_name)
+            logger.info("Server mode: Pinecone index %s", index_name)
+ 
     def _ensure_pinecone_index(self, index_name, cloud, region):
         existing = {idx.name for idx in self._pc.list_indexes()}
         if index_name not in existing:
@@ -122,19 +146,44 @@ class TOSAssistant:
         return all_chunks
 
     @retry(**_RETRY_PINECONE)
-    def _upsert_to_pinecone(self, chunks: list[Document], namespace: str):
-        PineconeVectorStore.from_documents(
-            chunks, self.embed_model, index_name=self._index_name,
-            namespace=namespace
-        )
+    def _upsert_to_vectorstore(self, chunks: list, namespace: str):
+        """Upsert chunks to whichever vector store is active."""
+        if self._use_local:
+            # ChromaDB: namespace maps to collection name suffix
+            collection_name = f"{self._chroma_collection_name}_{namespace}"
+            collection = self._chroma_client.get_or_create_collection(
+                name=collection_name,
+                metadata={"hnsw:space": "cosine"},
+            )
+            # Embed and upsert in batches of 100
+            batch_size = 100
+            for i in range(0, len(chunks), batch_size):
+                batch = chunks[i: i + batch_size]
+                texts = [c.page_content for c in batch]
+                embeddings = self.embed_model.embed_documents(texts)
+                ids = [f"{namespace}_{c.metadata['chunk_id']}" for c in batch]
+                metadatas = [c.metadata for c in batch]
+                collection.upsert(
+                    ids=ids,
+                    embeddings=embeddings,
+                    documents=texts,
+                    metadatas=metadatas,
+                )
+        else:
+            PineconeVectorStore.from_documents(
+                chunks, self.embed_model,
+                index_name=self._index_name,
+                namespace=namespace,
+            )
 
-    def _index_chunks(self, documents: list[Document], metrics: dict, state: SessionState):
+    def _index_chunks(self, documents: list, metrics: dict, state):
         chunks = self._build_chunks(documents)
         state.cached_chunks = chunks
         metrics["chunk_count"] = len(chunks)
         if not chunks:
+            from src.RAG.schemas import IngestionError
             raise IngestionError("Chunking produced zero chunks.")
-        self._upsert_to_pinecone(chunks, state.pinecone_namespace)
+        self._upsert_to_vectorstore(chunks, state.pinecone_namespace)
 
     def ingest_document(self, pdf_path: str, state: SessionState):
         docs = load_pdf(pdf_path)
@@ -158,28 +207,54 @@ class TOSAssistant:
         return [doc_map[cid] for cid in sorted(scores, key=scores.__getitem__, reverse=True)]
 
     @retry(**_RETRY_PINECONE)
-    def _pinecone_search(self, query: str, namespace: str, k: int = 50) -> list[Document]:
-        vec_store = PineconeVectorStore(
-            index=self._pc_index, embedding=self.embed_model, namespace=namespace
-        )
-        return vec_store.similarity_search(query, k=k)
+    def _search_vectorstore(self, query: str, namespace: str, k: int = 50) -> list:
+        """Search whichever vector store is active."""
+        from langchain_core.documents import Document
+    
+        if self._use_local:
+            collection_name = f"{self._chroma_collection_name}_{namespace}"
+            try:
+                collection = self._chroma_client.get_collection(collection_name)
+            except Exception:
+                return []  # Collection doesn't exist yet (no doc uploaded)
+    
+            query_embedding = self.embed_model.embed_query(query)
+            results = collection.query(
+                query_embeddings=[query_embedding],
+                n_results=min(k, collection.count()),
+                include=["documents", "metadatas"],
+            )
+            docs = []
+            for text, meta in zip(results["documents"][0], results["metadatas"][0]):
+                docs.append(Document(page_content=text, metadata=meta))
+            return docs
+        else:
+            vec_store = PineconeVectorStore(
+                index=self._pc_index,
+                embedding=self.embed_model,
+                namespace=namespace,
+            )
+            return vec_store.similarity_search(query, k=k)
 
     @traceable(name="Hybrid Retrieval")
-    def _get_relevant_chunks(self, query: str, state: SessionState, top_k: int = 7) -> tuple[list[Document], dict]:
+    def _get_relevant_chunks(self, query: str, state, top_k: int = 7) -> tuple:
         rm: dict = {}
         try:
             t0 = time.perf_counter()
-            pinecone_results = self._pinecone_search(query, state.pinecone_namespace)
+            pinecone_results = self._search_vectorstore(query, state.pinecone_namespace)  # renamed
             rm["retrieval_s"] = time.perf_counter() - t0
-        except RetryError as exc:
+        except Exception as exc:
+            from src.RAG.schemas import RetrievalError
+            from tenacity import RetryError
             raise RetrievalError("Vector search unavailable.") from exc
-
-        if not pinecone_results: return [], rm
-
+    
+        if not pinecone_results:
+            return [], rm
+    
         bm25 = BM25Retriever.from_documents(pinecone_results, k=30)
         bm25_results = bm25.invoke(query)
         candidates = self._reciprocal_rank_fusion(pinecone_results, bm25_results)[:50]
-
+    
         pairs = [[query, doc.page_content] for doc in candidates]
         scores = self.cross_encoder.predict(pairs)
         ranked = sorted(zip(candidates, scores), key=lambda x: x[1], reverse=True)
@@ -284,6 +359,10 @@ class TOSAssistant:
 
     def delete_namespace(self, namespace: str):
         try:
-            self._pc_index.delete(delete_all=True, namespace=namespace)
+            if self._use_local:
+                collection_name = f"{self._chroma_collection_name}_{namespace}"
+                self._chroma_client.delete_collection(collection_name)
+            else:
+                self._pc_index.delete(delete_all=True, namespace=namespace)
         except Exception as e:
             logger.warning("Namespace deletion failed: %s", e)
