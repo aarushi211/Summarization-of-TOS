@@ -1,17 +1,6 @@
 # .gcloudignore
 
-# Ignore everything by default
-*
-
-# Explicitly ALLOW the files we need (Whitelist approach)
-!app/
-!src/
-<!-- !models/ -->
-!requirements.txt
-!README.md
-!Dockerfile
-
-# Ignore the heavy/useless stuff explicitly just in case
+# Standard ignores
 .git/
 .venv/
 venv/
@@ -19,3 +8,15 @@ __pycache__/
 *.pyc
 *.ipynb
 .DS_Store
+
+# Ignore models (they are in GCS)
+models/
+*.gguf
+
+# Ensure these are included
+!api/
+!src/
+!cloudbuild.yaml
+!.dockerignore
+!README.md
+!tests/

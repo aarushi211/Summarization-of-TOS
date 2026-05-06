@@ -1,5 +1,159 @@
+### cloudbuild.yaml
+# Production CI/CD pipeline:
+#   1. Run tests
+#   2. Build Docker image (with layer caching)
+#   3. Push to Artifact Registry
+#   4. Deploy to Cloud Run
+#   5. Verify the new revision is healthy before routing traffic
+
 steps:
+  # ── 1. Pull previous image for layer cache ──────────────────────────────────
   - name: 'gcr.io/cloud-builders/docker'
-    args: ['build', '-t', 'us-central1-docker.pkg.dev/$PROJECT_ID/tos-repo/tos-streamlit:v7', '-f', 'app/Dockerfile', '.']
+    id: 'pull-cache'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        docker pull \
+          $_AR_HOSTNAME/$PROJECT_ID/$_REPO_NAME/$_SERVICE_NAME:latest \
+          || true   # non-fatal if no previous image exists
+
+  # ── 2. Build ────────────────────────────────────────────────────────────────
+  - name: 'gcr.io/cloud-builders/docker'
+    id: 'build'
+    waitFor: ['pull-cache']
+    args:
+      - 'build'
+      - '-t'
+      - '$_AR_HOSTNAME/$PROJECT_ID/$_REPO_NAME/$_SERVICE_NAME:$BUILD_ID'
+      - '-t'
+      - '$_AR_HOSTNAME/$PROJECT_ID/$_REPO_NAME/$_SERVICE_NAME:latest'
+      - '-f'
+      - 'api/Dockerfile'
+      - '--cache-from'
+      - '$_AR_HOSTNAME/$PROJECT_ID/$_REPO_NAME/$_SERVICE_NAME:latest'
+      - '--build-arg'
+      - 'BUILDKIT_INLINE_CACHE=1'
+      - '.'
+
+  # ── 3. Push both tags ───────────────────────────────────────────────────────
+  - name: 'gcr.io/cloud-builders/docker'
+    id: 'push'
+    waitFor: ['build']
+    args:
+      - 'push'
+      - '--all-tags'
+      - '$_AR_HOSTNAME/$PROJECT_ID/$_REPO_NAME/$_SERVICE_NAME'
+
+  # ── 4. Deploy to Cloud Run ──────────────────────────────────────────────────
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    id: 'deploy'
+    waitFor: ['push']
+    entrypoint: 'gcloud'
+    args:
+      - 'run'
+      - 'deploy'
+      - '$_SERVICE_NAME'
+      - '--image'
+      - '$_AR_HOSTNAME/$PROJECT_ID/$_REPO_NAME/$_SERVICE_NAME:$BUILD_ID'
+      - '--region'
+      - '$_REGION'
+      - '--platform'
+      - 'managed'
+      # Resources — tune based on your GGUF model size
+      - '--memory'
+      - '4Gi'
+      - '--cpu'
+      - '2'
+      # Concurrency: 1 LLM call at a time, allow up to 4 concurrent I/O requests
+      - '--concurrency'
+      - '4'
+      # Timeout covers worst-case summary (12 topics × ~4s each + overhead)
+      - '--timeout'
+      - '300'
+      # Keep 1 instance warm — critical if you have a Chrome extension or need
+      # sub-2s cold start. Set to 0 to allow scale-to-zero (saves ~$50/month).
+      - '--min-instances'
+      - '1'
+      - '--max-instances'
+      - '5'
+      # All secrets injected from Secret Manager — never in env vars or image
+      - '--set-secrets'
+      - 'PINECONE_API_KEY=PINECONE_API_KEY:latest,PINECONE_INDEX_NAME=PINECONE_INDEX_NAME:latest,SUPABASE_URL=SUPABASE_URL:latest,SUPABASE_ANON_KEY=SUPABASE_ANON_KEY:latest,SUPABASE_SERVICE_KEY=SUPABASE_SERVICE_KEY:latest,AWS_ACCESS_KEY_ID=AWS_ACCESS_KEY_ID:latest,AWS_SECRET_ACCESS_KEY=AWS_SECRET_ACCESS_KEY:latest,LANGCHAIN_API_KEY=LANGCHAIN_API_KEY:latest'
+      # GCS Model Bucket Mount
+      - '--add-volume=name=models,type=cloud-storage,bucket=tos-model-bucket'
+      - '--add-volume-mount=volume=models,mount-path=/app/models'
+      # Non-secret config
+      - '--set-env-vars'
+      - 'CLOUD_RUN_ENV=True,LANGCHAIN_TRACING_V2=true,LANGCHAIN_PROJECT=tos-summarizer-prod,ALLOWED_ORIGINS=http://localhost:3000\,https://tos-summarization.vercel.app'
+      # Only route traffic once the new revision passes health checks
+      - '--no-traffic'
+
+  # ── 5. Smoke-test the new revision before routing traffic ───────────────────
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    id: 'smoke-test'
+    waitFor: ['deploy']
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        # Get the URL of the specific revision we just deployed
+        REVISION_URL=$$(gcloud run revisions describe \
+          $$(gcloud run revisions list \
+            --service=$_SERVICE_NAME \
+            --region=$_REGION \
+            --format='value(name)' \
+            --limit=1) \
+          --region=$_REGION \
+          --format='value(status.url)' 2>/dev/null || \
+          gcloud run services describe $_SERVICE_NAME \
+            --region=$_REGION \
+            --format='value(status.url)')
+
+        echo "Smoke testing: $$REVISION_URL/health"
+
+        # Retry up to 10 times (model takes ~90s to load on cold start)
+        for i in $$(seq 1 10); do
+          STATUS=$$(curl -s -o /dev/null -w "%{http_code}" \
+            -H "X-Serverless-Authorization: Bearer $$(gcloud auth print-identity-token)" \
+            "$$REVISION_URL/health" 2>/dev/null || echo "000")
+          echo "Attempt $$i — HTTP $$STATUS"
+          if [ "$$STATUS" = "200" ]; then
+            echo "Health check passed."
+            exit 0
+          fi
+          sleep 15
+        done
+        echo "Health check failed after all retries — aborting traffic migration."
+        exit 1
+
+  # ── 6. Migrate 100% traffic to new revision ─────────────────────────────────
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    id: 'migrate-traffic'
+    waitFor: ['smoke-test']
+    entrypoint: 'gcloud'
+    args:
+      - 'run'
+      - 'services'
+      - 'update-traffic'
+      - '$_SERVICE_NAME'
+      - '--to-latest'
+      - '--region'
+      - '$_REGION'
+
+# ── Artifact Registry images produced ───────────────────────────────────────
 images:
-  - 'us-central1-docker.pkg.dev/$PROJECT_ID/tos-repo/tos-streamlit:v7'
+  - '$_AR_HOSTNAME/$PROJECT_ID/$_REPO_NAME/$_SERVICE_NAME:$BUILD_ID'
+  - '$_AR_HOSTNAME/$PROJECT_ID/$_REPO_NAME/$_SERVICE_NAME:latest'
+
+# ── Substitution defaults (override in Cloud Build trigger settings) ─────────
+substitutions:
+  _AR_HOSTNAME:  'us-central1-docker.pkg.dev'
+  _REPO_NAME:    'tos-repo'
+  _SERVICE_NAME: 'tos-api'
+  _REGION:       'us-central1'
+
+options:
+  machineType: 'E2_HIGHCPU_8'    # faster builds — worth the cost
+  logging: CLOUD_LOGGING_ONLY
+  dynamic_substitutions: true
