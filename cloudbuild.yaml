@@ -100,7 +100,7 @@ steps:
       - 'PINECONE_API_KEY=PINECONE_API_KEY:latest,PINECONE_INDEX_NAME=PINECONE_INDEX_NAME:latest,SUPABASE_URL=SUPABASE_URL:latest,SUPABASE_ANON_KEY=SUPABASE_ANON_KEY:latest,SUPABASE_SERVICE_KEY=SUPABASE_SERVICE_KEY:latest,AWS_ACCESS_KEY_ID=AWS_ACCESS_KEY_ID:latest,AWS_SECRET_ACCESS_KEY=AWS_SECRET_ACCESS_KEY:latest,LANGCHAIN_API_KEY=LANGCHAIN_API_KEY:latest'
       # Non-secret config
       - '--set-env-vars'
-      - 'CLOUD_RUN_ENV=True,LANGCHAIN_TRACING_V2=true,LANGCHAIN_PROJECT=tos-summarizer-prod,ALLOWED_ORIGINS=https://your-production-domain.com'
+      - 'CLOUD_RUN_ENV=True,LANGCHAIN_TRACING_V2=true,LANGCHAIN_PROJECT=tos-summarizer-prod,ALLOWED_ORIGINS=http://localhost:3000\,https://tos-summarization.vercel.app'
       # Only route traffic once the new revision passes health checks
       - '--no-traffic'
 

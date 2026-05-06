@@ -40,10 +40,8 @@ ENV PATH=/root/.local/bin:$PATH
 
 # ── Application code ──────────────────────────────────────────────────────────
 # Copy only what the API needs — not the entire repo
-COPY api/main.py            ./api/main.py
-COPY src/RAG/rag_pipeline.py ./src/RAG/rag_pipeline.py
-COPY src/__init__.py         ./src/__init__.py
-COPY src/RAG/__init__.py     ./src/RAG/__init__.py
+COPY api/ ./api/
+COPY src/ ./src/
 
 # ── Model ─────────────────────────────────────────────────────────────────────
 # The GGUF model is baked into the image for simplicity.
