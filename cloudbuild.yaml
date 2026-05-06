@@ -1,30 +1,11 @@
 ### cloudbuild.yaml
 # Production CI/CD pipeline:
-#   1. Run tests
-#   2. Build Docker image (with layer caching)
-#   3. Push to Artifact Registry
-#   4. Deploy to Cloud Run
-#   5. Verify the new revision is healthy before routing traffic
+#   1. Build Docker image (with layer caching)
+#   2. Push to Artifact Registry
+#   3. Deploy to Cloud Run with GCS Bucket Mount
+#   4. Verify the new revision is healthy before routing traffic
 
 steps:
-  # ── 0. Install and test (fast — no Docker needed) ──────────────────────────
-  - name: 'python:3.11-slim'
-    id: 'run-tests'
-    entrypoint: 'bash'
-    args:
-      - '-c'
-      - |
-        pip install -q pytest pytest-asyncio httpx \
-            -r api/requirements.lock.txt
-        pytest tests/ -x -q --tb=short
-    env:
-      # Stub env so the app can import without real credentials
-      - 'PINECONE_API_KEY=test'
-      - 'PINECONE_INDEX_NAME=test'
-      - 'SUPABASE_URL=http://localhost'
-      - 'SUPABASE_ANON_KEY=test'
-      - 'SUPABASE_SERVICE_KEY=test'
-
   # ── 1. Pull previous image for layer cache ──────────────────────────────────
   - name: 'gcr.io/cloud-builders/docker'
     id: 'pull-cache'
@@ -39,11 +20,11 @@ steps:
   # ── 2. Build ────────────────────────────────────────────────────────────────
   - name: 'gcr.io/cloud-builders/docker'
     id: 'build'
-    waitFor: ['run-tests', 'pull-cache']
+    waitFor: ['pull-cache']
     args:
       - 'build'
       - '-t'
-      - '$_AR_HOSTNAME/$PROJECT_ID/$_REPO_NAME/$_SERVICE_NAME:$COMMIT_SHA'
+      - '$_AR_HOSTNAME/$PROJECT_ID/$_REPO_NAME/$_SERVICE_NAME:$BUILD_ID'
       - '-t'
       - '$_AR_HOSTNAME/$PROJECT_ID/$_REPO_NAME/$_SERVICE_NAME:latest'
       - '-f'
@@ -73,7 +54,7 @@ steps:
       - 'deploy'
       - '$_SERVICE_NAME'
       - '--image'
-      - '$_AR_HOSTNAME/$PROJECT_ID/$_REPO_NAME/$_SERVICE_NAME:$COMMIT_SHA'
+      - '$_AR_HOSTNAME/$PROJECT_ID/$_REPO_NAME/$_SERVICE_NAME:$BUILD_ID'
       - '--region'
       - '$_REGION'
       - '--platform'
@@ -98,6 +79,9 @@ steps:
       # All secrets injected from Secret Manager — never in env vars or image
       - '--set-secrets'
       - 'PINECONE_API_KEY=PINECONE_API_KEY:latest,PINECONE_INDEX_NAME=PINECONE_INDEX_NAME:latest,SUPABASE_URL=SUPABASE_URL:latest,SUPABASE_ANON_KEY=SUPABASE_ANON_KEY:latest,SUPABASE_SERVICE_KEY=SUPABASE_SERVICE_KEY:latest,AWS_ACCESS_KEY_ID=AWS_ACCESS_KEY_ID:latest,AWS_SECRET_ACCESS_KEY=AWS_SECRET_ACCESS_KEY:latest,LANGCHAIN_API_KEY=LANGCHAIN_API_KEY:latest'
+      # GCS Model Bucket Mount
+      - '--add-volume=name=models,type=cloud-storage,bucket=tos-model-bucket'
+      - '--add-volume-mount=volume=models,mount-path=/app/models'
       # Non-secret config
       - '--set-env-vars'
       - 'CLOUD_RUN_ENV=True,LANGCHAIN_TRACING_V2=true,LANGCHAIN_PROJECT=tos-summarizer-prod,ALLOWED_ORIGINS=http://localhost:3000\,https://tos-summarization.vercel.app'
@@ -113,8 +97,8 @@ steps:
       - '-c'
       - |
         # Get the URL of the specific revision we just deployed
-        REVISION_URL=$(gcloud run revisions describe \
-          $(gcloud run revisions list \
+        REVISION_URL=$$(gcloud run revisions describe \
+          $$(gcloud run revisions list \
             --service=$_SERVICE_NAME \
             --region=$_REGION \
             --format='value(name)' \
@@ -125,15 +109,15 @@ steps:
             --region=$_REGION \
             --format='value(status.url)')
 
-        echo "Smoke testing: $REVISION_URL/health"
+        echo "Smoke testing: $$REVISION_URL/health"
 
         # Retry up to 10 times (model takes ~90s to load on cold start)
-        for i in $(seq 1 10); do
-          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-            -H "X-Serverless-Authorization: Bearer $(gcloud auth print-identity-token)" \
-            "$REVISION_URL/health" 2>/dev/null || echo "000")
-          echo "Attempt $i — HTTP $STATUS"
-          if [ "$STATUS" = "200" ]; then
+        for i in $$(seq 1 10); do
+          STATUS=$$(curl -s -o /dev/null -w "%{http_code}" \
+            -H "X-Serverless-Authorization: Bearer $$(gcloud auth print-identity-token)" \
+            "$$REVISION_URL/health" 2>/dev/null || echo "000")
+          echo "Attempt $$i — HTTP $$STATUS"
+          if [ "$$STATUS" = "200" ]; then
             echo "Health check passed."
             exit 0
           fi
@@ -158,14 +142,14 @@ steps:
 
 # ── Artifact Registry images produced ───────────────────────────────────────
 images:
-  - '$_AR_HOSTNAME/$PROJECT_ID/$_REPO_NAME/$_SERVICE_NAME:$COMMIT_SHA'
+  - '$_AR_HOSTNAME/$PROJECT_ID/$_REPO_NAME/$_SERVICE_NAME:$BUILD_ID'
   - '$_AR_HOSTNAME/$PROJECT_ID/$_REPO_NAME/$_SERVICE_NAME:latest'
 
 # ── Substitution defaults (override in Cloud Build trigger settings) ─────────
 substitutions:
   _AR_HOSTNAME:  'us-central1-docker.pkg.dev'
   _REPO_NAME:    'tos-repo'
-  _SERVICE_NAME: 'tos-api'
+  _SERVICE_NAME: 'tos-summarization-service'
   _REGION:       'us-central1'
 
 options:

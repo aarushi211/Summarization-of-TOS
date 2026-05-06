@@ -6,13 +6,13 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from pythonjsonlogger import json as jsonlogger
+from pythonjsonlogger import jsonlogger
 from slowapi.errors import RateLimitExceeded
 from slowapi import _rate_limit_exceeded_handler
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from api.core.config import settings
-from api.core.database import init_db, init_s3, init_assistant
+from api.core.database import init_db, init_storage, init_assistant
 from api.core.security import limiter
 from api.routers import auth, ingest, chat, history, admin
 
@@ -78,7 +78,7 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
-    init_s3()
+    init_storage()
     init_assistant()
     logger.info("startup complete", extra={"event": "startup"})
     yield

@@ -53,10 +53,9 @@ class TOSAssistant:
     data_dir: str = "",
     n_gpu_layers: int = -1,
 ):
-         self._metrics: list[dict] = []
-         self._use_local = use_local_vectorstore or not pinecone_api_key
-    
-        from pathlib import Path
+        self._metrics: list[dict] = []
+        self._use_local = use_local_vectorstore or not pinecone_api_key
+
         PROJECT_ROOT = Path(model_path).resolve().parent.parent
         local_embed = PROJECT_ROOT / "models" / "embeddings"
         local_cross = PROJECT_ROOT / "models" / "cross-encoder" / "ms-marco-MiniLM-L-6-v2"
