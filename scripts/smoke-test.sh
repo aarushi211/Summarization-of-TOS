@@ -26,9 +26,7 @@ fi
 echo "Smoke testing: $REVISION_URL/health"
 
 for i in $(seq 1 12); do
-  ID_TOKEN=$(gcloud auth print-identity-token --audiences="$REVISION_URL")
   STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-    -H "Authorization: Bearer $ID_TOKEN" \
     "$REVISION_URL/health" 2>/dev/null || echo "000")
   echo "Attempt $i — HTTP $STATUS"
   if [ "$STATUS" = "200" ]; then
