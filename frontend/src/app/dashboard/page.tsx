@@ -27,26 +27,28 @@ interface Source {
   excerpt: string;
 }
 
+interface TopicResult {
+  label: string;
+  summary: string;
+  sources?: Source[];
+}
+
+interface SummaryResponse {
+  topics: TopicResult[];
+}
+
 interface Message {
   role: "user" | "assistant";
   content: string;
   cited_sources?: Source[];
-  error?: string;        // typed SSE error surfaced here
+  error?: string;
   isStreaming?: boolean;
 }
 
-interface TopicResult {
-  label: string;
-  summary: string;
-  sources: Source[];
-  error?: string;
-}
-
-// ── API URL from env — never hardcoded ───────────────────────────────────────
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+// ── API base URL — trailing slash stripped to prevent double-slash URLs ───────
+const API_BASE = (process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000").replace(/\/$/, "");
 
 // ── Authenticated fetch helper ────────────────────────────────────────────────
-// Uses getValidToken() which refreshes automatically before expiry.
 async function authFetch(
   path: string,
   options: RequestInit = {},
@@ -54,7 +56,7 @@ async function authFetch(
   const token = await getValidToken();
   if (!token) throw new Error("NOT_AUTHENTICATED");
 
-  return fetch(`${API_URL}${path}`, {
+  return fetch(`${API_BASE}${path}`, {
     ...options,
     headers: {
       ...(options.headers ?? {}),
@@ -64,8 +66,6 @@ async function authFetch(
 }
 
 // ── SSE parser ────────────────────────────────────────────────────────────────
-// Parses the chunked ReadableStream from a fetch Response into SSE events.
-// Handles events split across multiple read() calls (buffer carry-forward).
 async function consumeSse(
   response: Response,
   onEvent: (event: Record<string, unknown>) => void,
@@ -121,6 +121,11 @@ export default function Dashboard() {
   const [docStatus, setDocStatus] = useState<string>("ready");
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  // ── Model readiness ───────────────────────────────────────────────────────
+  const [modelReady, setModelReady] = useState(false);
+  const [modelChecking, setModelChecking] = useState(true);
+  const modelPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
   // ── Summary ───────────────────────────────────────────────────────────────
   const [summaryTopics, setSummaryTopics] = useState<TopicResult[]>([]);
   const [isSummarizing, setIsSummarizing] = useState(false);
@@ -137,15 +142,45 @@ export default function Dashboard() {
   const [activeTab, setActiveTab] = useState<"summary" | "chat">("summary");
   const [isDeleting, setIsDeleting] = useState(false);
 
-  // ── Scroll to bottom on new messages ─────────────────────────────────────
+  // ── Scroll chat to bottom on new messages ─────────────────────────────────
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
+  // ── Model readiness poller ────────────────────────────────────────────────
+  // Polls /health every 5s until model_ready=true, then stops.
+  // Runs independently of auth so the banner shows immediately on load.
+  useEffect(() => {
+    const checkModel = async () => {
+      try {
+        const res = await fetch(`${API_BASE}/health`);
+        if (res.ok) {
+          const data = await res.json();
+          if (data.model_ready) {
+            setModelReady(true);
+            setModelChecking(false);
+            if (modelPollRef.current) {
+              clearInterval(modelPollRef.current);
+              modelPollRef.current = null;
+            }
+          }
+        }
+      } catch {
+        // Network error — will retry on next interval
+      }
+    };
+
+    checkModel();
+    modelPollRef.current = setInterval(checkModel, 5000);
+
+    return () => {
+      if (modelPollRef.current) clearInterval(modelPollRef.current);
+    };
+  }, []);
+
   // ── Auth check on mount ───────────────────────────────────────────────────
   useEffect(() => {
     const email = localStorage.getItem("user_email");
-    // getValidToken() reads from sessionStorage (set by login page)
     getValidToken().then(token => {
       if (!token) {
         router.push("/");
@@ -172,7 +207,7 @@ export default function Dashboard() {
 
   // ── Logout ────────────────────────────────────────────────────────────────
   const handleLogout = () => {
-    clearTokens();                          // clears sessionStorage + localStorage
+    clearTokens();
     localStorage.removeItem("user_email");
     router.push("/");
   };
@@ -214,7 +249,6 @@ export default function Dashboard() {
       setDocStatus("processing");
       fetchHistory();
 
-      // Poll every 3 s until ready or error
       if (pollRef.current) clearInterval(pollRef.current);
       pollRef.current = setInterval(async () => {
         try {
@@ -226,7 +260,6 @@ export default function Dashboard() {
               clearInterval(pollRef.current!);
               pollRef.current = null;
               fetchHistory();
-              // Show error reason if ingestion failed
               if (s.status === "error" && s.error_reason) {
                 setSummaryError(`Ingestion failed: ${s.error_reason}`);
               }
@@ -245,14 +278,13 @@ export default function Dashboard() {
   // ── Load past document ────────────────────────────────────────────────────
   const loadPastDocument = async (doc: Document) => {
     setActiveDoc(doc);
-    setSummaryTopics([]);    // FIX: was setSummaryData(null) — function didn't exist
+    setSummaryTopics([]);
     setSummaryError(null);
     setChatError(null);
     setMessages([]);
     setDocStatus(doc.status ?? "ready");
 
     try {
-      // Parallel fetch chat and summary history
       const [chatRes, summaryRes] = await Promise.all([
         authFetch(`/history/chats/${doc.id}`),
         authFetch(`/history/summaries/${doc.id}`)
@@ -278,8 +310,9 @@ export default function Dashboard() {
     }
   };
 
+  // ── Generate summary ──────────────────────────────────────────────────────
   const handleGenerateSummary = async () => {
-    if (!activeDoc) return;
+    if (!activeDoc || !modelReady) return;
     setIsSummarizing(true);
     setSummaryTopics([]);
     setSummaryError(null);
@@ -295,10 +328,8 @@ export default function Dashboard() {
         if (event.type === "topic_ready") {
           setSummaryTopics(prev => [...prev, event.data as TopicResult]);
         } else if (event.type === "error") {
-          // Typed error from the pipeline — surface it, don't just log
           setSummaryError(event.data as string);
         }
-        // "done" — nothing to do, isSummarizing will be cleared in finally
       });
 
     } catch (err: unknown) {
@@ -308,17 +339,16 @@ export default function Dashboard() {
     }
   };
 
-  // ── Send chat message (SSE) ───────────────────────────────────────────────
+  // ── Send chat message ─────────────────────────────────────────────────────
   const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
     const query = chatInput.trim();
-    if (!query || !activeDoc) return;
+    if (!query || !activeDoc || !modelReady) return;
 
     setChatInput("");
     setChatError(null);
     setIsChatting(true);
 
-    // Append user message + streaming placeholder immediately
     setMessages(prev => [
       ...prev,
       { role: "user", content: query },
@@ -350,7 +380,6 @@ export default function Dashboard() {
             next[next.length - 1] = last;
             return next;
           });
-
         } else if (event.type === "sources") {
           setMessages(prev => {
             const next = [...prev];
@@ -359,7 +388,6 @@ export default function Dashboard() {
             next[next.length - 1] = last;
             return next;
           });
-
         } else if (event.type === "done") {
           setMessages(prev => {
             const next = [...prev];
@@ -368,9 +396,7 @@ export default function Dashboard() {
             next[next.length - 1] = last;
             return next;
           });
-
         } else if (event.type === "error") {
-          // Typed pipeline error — show in message bubble AND banner
           const errMsg = event.data as string;
           setChatError(errMsg);
           setMessages(prev => {
@@ -378,7 +404,6 @@ export default function Dashboard() {
             const last = { ...next[next.length - 1] };
             last.isStreaming = false;
             last.error = errMsg;
-            // Preserve any partial content that arrived before the error
             next[next.length - 1] = last;
             return next;
           });
@@ -405,8 +430,7 @@ export default function Dashboard() {
   const handleDeleteDocument = async () => {
     if (!activeDoc) return;
     if (!confirm(
-      `Delete "${activeDoc.filename}"?\n\n` +
-      `This removes all chat history and vectors from the database. Cannot be undone.`
+      `Delete "${activeDoc.filename}"?\n\nThis removes all chat history and vectors. Cannot be undone.`
     )) return;
 
     setIsDeleting(true);
@@ -432,13 +456,11 @@ export default function Dashboard() {
   const renderCitedText = (text: string, sources?: Source[]) => {
     if (!sources?.length || !text) return <span>{text}</span>;
 
-    // Build a case-insensitive map of tags to source indices
     const tagMap: Record<string, number> = {};
-    sources.forEach((s, i) => { 
-      tagMap[s.tag.toLowerCase().trim()] = i + 1; 
+    sources.forEach((s, i) => {
+      tagMap[s.tag.toLowerCase().trim()] = i + 1;
     });
 
-    // Split text by [SOURCE N] or [source n]
     const parts = text.split(/(\[source \d+\]|\[SOURCE \d+\])/gi);
 
     return (
@@ -446,9 +468,7 @@ export default function Dashboard() {
         {parts.map((part, i) => {
           const key = part.toLowerCase().trim();
           const num = tagMap[key];
-          
           if (!num) return <span key={i}>{part}</span>;
-          
           const src = sources[num - 1];
           return (
             <span
@@ -462,7 +482,7 @@ export default function Dashboard() {
                 cursor: "help",
                 marginLeft: "2px",
                 padding: "0 2px",
-                borderBottom: "1px solid var(--accent-primary)"
+                borderBottom: "1px solid var(--accent-primary)",
               }}
             >
               [{num}]
@@ -516,12 +536,7 @@ export default function Dashboard() {
               <div
                 key={doc.id}
                 className="group"
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "0.25rem",
-                  width: "100%",
-                }}
+                style={{ display: "flex", alignItems: "center", gap: "0.25rem", width: "100%" }}
               >
                 <button
                   onClick={() => { loadPastDocument(doc); setSidebarOpen(false); }}
@@ -549,12 +564,7 @@ export default function Dashboard() {
                 <button
                   onClick={(e) => { e.stopPropagation(); setActiveDoc(doc); handleDeleteDocument(); }}
                   className="opacity-0 group-hover:opacity-100 transition-opacity"
-                  style={{
-                    padding: "0.5rem",
-                    color: "var(--text-muted)",
-                    background: "transparent",
-                    border: "none",
-                  }}
+                  style={{ padding: "0.5rem", color: "var(--text-muted)", background: "transparent", border: "none" }}
                   onMouseEnter={e => (e.currentTarget.style.color = "#ef4444")}
                   onMouseLeave={e => (e.currentTarget.style.color = "var(--text-muted)")}
                 >
@@ -589,10 +599,16 @@ export default function Dashboard() {
 
         {/* Header */}
         <header style={{
-          height: "64px", borderBottom: "var(--glass-border)",
-          display: "flex", alignItems: "center", padding: "0 2rem",
-          background: "rgba(10, 10, 15, 0.8)", backdropFilter: "blur(12px)",
-          position: "sticky", top: 0, zIndex: 40,
+          height: "64px",
+          borderBottom: "var(--glass-border)",
+          display: "flex",
+          alignItems: "center",
+          padding: "0 2rem",
+          background: "rgba(10, 10, 15, 0.8)",
+          backdropFilter: "blur(12px)",
+          position: "sticky",
+          top: 0,
+          zIndex: 40,
         }}>
           {!isSidebarOpen && (
             <button onClick={() => setSidebarOpen(true)} style={{ marginRight: "1rem", color: "var(--text-muted)" }}>
@@ -632,7 +648,26 @@ export default function Dashboard() {
             <span style={{ fontWeight: 600, color: "white" }}>Upload Document</span>
           )}
         </header>
-        
+
+        {/* ── Model loading banner ── */}
+        {!modelReady && (
+          <div style={{
+            display: "flex",
+            alignItems: "center",
+            gap: "0.75rem",
+            padding: "0.625rem 2rem",
+            background: "rgba(251, 191, 36, 0.08)",
+            borderBottom: "1px solid rgba(251, 191, 36, 0.2)",
+          }}>
+            <Loader2 className="spinner" size={15} color="#fbbf24" />
+            <span style={{ fontSize: "0.8125rem", color: "#fbbf24" }}>
+              {modelChecking
+                ? "AI model is warming up — this takes ~60 seconds on a cold start…"
+                : "Connecting to AI…"}
+            </span>
+          </div>
+        )}
+
         {/* Toggle Bar */}
         {activeDoc && (
           <div style={{
@@ -640,16 +675,16 @@ export default function Dashboard() {
             justifyContent: "center",
             padding: "1rem 0",
             background: "rgba(10, 10, 15, 0.4)",
-            borderBottom: "1px solid rgba(255,255,255,0.05)"
+            borderBottom: "1px solid rgba(255,255,255,0.05)",
           }}>
             <div style={{
               display: "flex",
               background: "rgba(0,0,0,0.3)",
               padding: "4px",
               borderRadius: "12px",
-              border: "1px solid rgba(255,255,255,0.05)"
+              border: "1px solid rgba(255,255,255,0.05)",
             }}>
-              <button 
+              <button
                 onClick={() => setActiveTab("summary")}
                 style={{
                   padding: "8px 24px",
@@ -660,12 +695,12 @@ export default function Dashboard() {
                   background: activeTab === "summary" ? "var(--gradient-brand)" : "transparent",
                   color: activeTab === "summary" ? "white" : "var(--text-muted)",
                   border: "none",
-                  cursor: "pointer"
+                  cursor: "pointer",
                 }}
               >
                 Analysis View
               </button>
-              <button 
+              <button
                 onClick={() => setActiveTab("chat")}
                 style={{
                   padding: "8px 24px",
@@ -676,7 +711,7 @@ export default function Dashboard() {
                   background: activeTab === "chat" ? "var(--gradient-brand)" : "transparent",
                   color: activeTab === "chat" ? "white" : "var(--text-muted)",
                   border: "none",
-                  cursor: "pointer"
+                  cursor: "pointer",
                 }}
               >
                 Interactive Chat
@@ -751,13 +786,14 @@ export default function Dashboard() {
 
             /* ── Active document view ── */
             <div style={{ height: "calc(100vh - 180px)", display: "flex", flexDirection: "column" }}>
-              
+
               {activeTab === "summary" ? (
+
                 /* ── Analysis View ── */
-                <div style={{ 
-                  display: "flex", flexDirection: "column", gap: "1.5rem", 
-                  overflowY: "auto", paddingRight: "1rem", maxWidth: "1000px", 
-                  margin: "0 auto", width: "100%" 
+                <div style={{
+                  display: "flex", flexDirection: "column", gap: "1.5rem",
+                  overflowY: "auto", paddingRight: "1rem",
+                  maxWidth: "1000px", margin: "0 auto", width: "100%",
                 }}>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                     <h2 style={{ fontSize: "1.25rem", fontWeight: 600, display: "flex", alignItems: "center", gap: "0.5rem" }}>
@@ -765,13 +801,21 @@ export default function Dashboard() {
                     </h2>
                     <button
                       className="btn btn-secondary"
-                      style={{ padding: "0.5rem 1rem", fontSize: "0.75rem" }}
+                      style={{
+                        padding: "0.5rem 1rem",
+                        fontSize: "0.75rem",
+                        opacity: !modelReady ? 0.5 : 1,
+                        cursor: !modelReady ? "not-allowed" : "pointer",
+                      }}
                       onClick={handleGenerateSummary}
-                      disabled={isSummarizing || docStatus === "processing"}
+                      disabled={isSummarizing || docStatus === "processing" || !modelReady}
+                      title={!modelReady ? "AI model is still loading…" : undefined}
                     >
                       {isSummarizing
                         ? <><Loader2 className="spinner" size={14} /> Analyzing…</>
-                        : summaryTopics.length > 0 ? "Refresh Analysis" : "Generate Analysis"
+                        : !modelReady
+                          ? "AI Loading…"
+                          : summaryTopics.length > 0 ? "Refresh Analysis" : "Generate Analysis"
                       }
                     </button>
                   </div>
@@ -779,8 +823,10 @@ export default function Dashboard() {
                   {/* Processing banner */}
                   {docStatus === "processing" && (
                     <div style={{
-                      padding: "1rem", background: "rgba(251,191,36,0.08)",
-                      border: "1px solid rgba(251,191,36,0.2)", borderRadius: "0.75rem",
+                      padding: "1rem",
+                      background: "rgba(251,191,36,0.08)",
+                      border: "1px solid rgba(251,191,36,0.2)",
+                      borderRadius: "0.75rem",
                       display: "flex", alignItems: "center", gap: "0.75rem",
                     }}>
                       <Loader2 className="spinner" size={18} color="#fbbf24" />
@@ -790,20 +836,36 @@ export default function Dashboard() {
                     </div>
                   )}
 
+                  {/* Summary error banner */}
+                  {summaryError && (
+                    <div style={{
+                      padding: "1rem",
+                      background: "rgba(239,68,68,0.08)",
+                      border: "1px solid rgba(239,68,68,0.2)",
+                      borderRadius: "0.75rem",
+                      fontSize: "0.875rem",
+                      color: "#f87171",
+                    }}>
+                      {summaryError}
+                    </div>
+                  )}
+
                   {summaryTopics.length === 0 && !isSummarizing && !summaryError && docStatus !== "processing" && (
                     <div className="glass-card" style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "4rem 2rem", opacity: 0.7 }}>
                       <Info size={32} color="var(--text-muted)" style={{ marginBottom: "1rem" }} />
                       <p style={{ textAlign: "center", color: "var(--text-secondary)" }}>
-                        Click generate to extract key clauses across 12 legal topics.
+                        {modelReady
+                          ? "Click generate to extract key clauses across 12 legal topics."
+                          : "Waiting for AI model to finish loading…"}
                       </p>
                     </div>
                   )}
 
                   {summaryTopics.map((topic, idx) => (
                     <div key={idx} className="glass-card" style={{ padding: "1.5rem", animation: "fadeIn 0.4s ease-out" }}>
-                      <h3 style={{ 
+                      <h3 style={{
                         fontSize: "1rem", fontWeight: 600, marginBottom: "0.75rem",
-                        color: topic.summary.includes("NOT_IN_DOCUMENT") ? "var(--text-muted)" : "white"
+                        color: topic.summary.includes("NOT_IN_DOCUMENT") ? "var(--text-muted)" : "white",
                       }}>
                         {topic.label}
                       </h3>
@@ -813,7 +875,7 @@ export default function Dashboard() {
                           : renderCitedText(topic.summary, topic.sources)
                         }
                       </p>
-                      
+
                       {topic.sources && topic.sources.length > 0 && (
                         <div style={{ marginTop: "1rem", display: "flex", flexDirection: "column", gap: "0.4rem" }}>
                           <p style={{ fontSize: "0.7rem", color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: "0.25rem" }}>
@@ -858,30 +920,50 @@ export default function Dashboard() {
                     </div>
                   )}
                 </div>
+
               ) : (
+
                 /* ── Chat View ── */
-                <div className="glass-card" style={{ 
-                  flex: 1, display: "flex", flexDirection: "column", 
-                  padding: "1rem", overflow: "hidden", maxWidth: "900px", 
-                  margin: "0 auto", width: "100%" 
+                <div className="glass-card" style={{
+                  flex: 1, display: "flex", flexDirection: "column",
+                  padding: "1rem", overflow: "hidden",
+                  maxWidth: "900px", margin: "0 auto", width: "100%",
                 }}>
-                  <div style={{ 
-                    flex: 1, overflowY: "auto", padding: "1.5rem", 
-                    display: "flex", flexDirection: "column", gap: "1.5rem" 
+                  <div style={{
+                    flex: 1, overflowY: "auto", padding: "1.5rem",
+                    display: "flex", flexDirection: "column", gap: "1.5rem",
                   }}>
                     {messages.length === 0 && (
                       <div style={{ margin: "auto", textAlign: "center", color: "var(--text-muted)" }}>
-                        <p>No messages yet. Ask a question about this document!</p>
+                        <p>
+                          {modelReady
+                            ? "No messages yet. Ask a question about this document!"
+                            : "AI model is warming up, please wait…"}
+                        </p>
+                      </div>
+                    )}
+
+                    {/* Chat error banner */}
+                    {chatError && (
+                      <div style={{
+                        padding: "0.75rem 1rem",
+                        background: "rgba(239,68,68,0.08)",
+                        border: "1px solid rgba(239,68,68,0.2)",
+                        borderRadius: "0.75rem",
+                        fontSize: "0.875rem",
+                        color: "#f87171",
+                      }}>
+                        {chatError}
                       </div>
                     )}
 
                     {messages.map((msg, idx) => (
-                      <div 
-                        key={idx} 
-                        style={{ 
-                          display: "flex", flexDirection: "column", 
-                          alignItems: msg.role === "user" ? "flex-end" : "flex-start", 
-                          animation: "fadeIn 0.3s ease-out" 
+                      <div
+                        key={idx}
+                        style={{
+                          display: "flex", flexDirection: "column",
+                          alignItems: msg.role === "user" ? "flex-end" : "flex-start",
+                          animation: "fadeIn 0.3s ease-out",
                         }}
                       >
                         <div style={{
@@ -894,10 +976,12 @@ export default function Dashboard() {
                           fontSize: "0.9375rem",
                           lineHeight: 1.5,
                         }}>
-                          {renderCitedText(msg.content, msg.cited_sources)}
+                          {msg.isStreaming && !msg.content
+                            ? <Loader2 className="spinner" size={16} color="var(--text-muted)" />
+                            : renderCitedText(msg.content, msg.cited_sources)
+                          }
                         </div>
 
-                        {/* Source expanders under assistant messages */}
                         {msg.role === "assistant" && msg.cited_sources && msg.cited_sources.length > 0 && (
                           <div style={{ marginTop: "0.5rem", width: "88%", display: "flex", flexDirection: "column", gap: "0.4rem" }}>
                             <p style={{ fontSize: "0.68rem", color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: "0.1rem" }}>
@@ -936,36 +1020,37 @@ export default function Dashboard() {
                   </div>
 
                   {/* Chat Input */}
-                  <form 
-                    onSubmit={handleSendMessage} 
-                    style={{ 
-                      display: "flex", gap: "1rem", padding: "1.5rem", 
-                      borderTop: "1px solid rgba(255,255,255,0.05)" 
+                  <form
+                    onSubmit={handleSendMessage}
+                    style={{
+                      display: "flex", gap: "1rem", padding: "1.5rem",
+                      borderTop: "1px solid rgba(255,255,255,0.05)",
                     }}
                   >
                     <input
                       type="text"
                       className="input-field"
-                      placeholder="Ask a specific question..."
+                      placeholder={modelReady ? "Ask a specific question…" : "Waiting for AI model…"}
                       value={chatInput}
                       onChange={e => setChatInput(e.target.value)}
-                      disabled={isChatting}
+                      disabled={isChatting || !modelReady}
                     />
-                    <button 
-                      type="submit" 
-                      className="btn btn-primary" 
-                      disabled={isChatting || !chatInput.trim()}
+                    <button
+                      type="submit"
+                      className="btn btn-primary"
+                      disabled={isChatting || !chatInput.trim() || !modelReady}
                       style={{ padding: "0.75rem" }}
+                      title={!modelReady ? "AI model is still loading…" : undefined}
                     >
                       {isChatting ? <Loader2 className="spinner" size={18} /> : <Send size={18} />}
                     </button>
                   </form>
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-        </main>
-      </div>
-    );
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      </main>
+    </div>
+  );
 }

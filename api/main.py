@@ -158,8 +158,9 @@ app.include_router(admin.router)
 
 @app.get("/health")
 async def health():
+    from api.core import database
     return {
         "status": "healthy",
         "version": settings.VERSION,
-        "debug": settings.DEBUG,
+        "model_ready": database.shared_assistant is not None,
     }

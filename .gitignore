@@ -80,3 +80,5 @@ Test_data.csv
 TOS_files/
 get-pip.py
 *.csv
+.vercel
+.env*.local
