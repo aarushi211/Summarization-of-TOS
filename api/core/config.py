@@ -125,11 +125,12 @@ class Settings(BaseSettings):
             self.DESKTOP_DATA_DIR.mkdir(parents=True, exist_ok=True)
             return self
 
+        # S3 bucket name is optional: archival upload is best-effort (see ingest router).
+        # AWS keys still required so boto3 can be configured when a bucket is set later.
         required = {
             "PINECONE_API_KEY": self.PINECONE_API_KEY,
             "SUPABASE_URL": self.SUPABASE_URL,
             "SUPABASE_SERVICE_KEY": self.SUPABASE_SERVICE_KEY,
-            "AWS_S3_BUCKET_NAME": self.AWS_S3_BUCKET_NAME,
             "AWS_ACCESS_KEY_ID": self.AWS_ACCESS_KEY_ID,
             "AWS_SECRET_ACCESS_KEY": self.AWS_SECRET_ACCESS_KEY,
             "ADMIN_SECRET": self.ADMIN_SECRET,
