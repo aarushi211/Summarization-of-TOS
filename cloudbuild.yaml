@@ -71,7 +71,7 @@ steps:
       - '--cpu'
       - '4'
       - '--concurrency'
-      - '4'
+      - '1'
       - '--timeout'
       - '300'
       - '--min-instances'
@@ -81,7 +81,7 @@ steps:
       - '--cpu-boost'
       - '--set-secrets'
       - 'PINECONE_API_KEY=PINECONE_API_KEY:latest,PINECONE_INDEX_NAME=PINECONE_INDEX_NAME:latest,SUPABASE_URL=SUPABASE_URL:latest,SUPABASE_ANON_KEY=SUPABASE_ANON_KEY:latest,SUPABASE_SERVICE_KEY=SUPABASE_SERVICE_KEY:latest,AWS_ACCESS_KEY_ID=AWS_ACCESS_KEY_ID:latest,AWS_SECRET_ACCESS_KEY=AWS_SECRET_ACCESS_KEY:latest,LANGCHAIN_API_KEY=LANGCHAIN_API_KEY:latest,ADMIN_SECRET=ADMIN_SECRET:latest,AWS_S3_BUCKET_NAME=AWS_S3_BUCKET_NAME:latest'
-      - '--add-volume=name=models,type=cloud-storage,bucket=tos-model-bucket'
+      - '--add-volume=name=models,type=cloud-storage,bucket=tos-model-bucket-east'
       - '--add-volume-mount=volume=models,mount-path=/app/models'
       - '--set-env-vars'
       - 'CLOUD_RUN_ENV=true,DEBUG=false,LANGCHAIN_TRACING_V2=true,LANGCHAIN_PROJECT=tos-summarizer-prod,ALLOWED_ORIGINS=https://tos-summarization.vercel.app'
@@ -119,12 +119,7 @@ images:
 
 # ── Substitution defaults ────────────────────────────────────────────────────
 substitutions:
-  _AR_HOSTNAME:  'us-central1-docker.pkg.dev'
+  _AR_HOSTNAME:  'us-east1-docker.pkg.dev'
   _REPO_NAME:    'tos-repo'
   _SERVICE_NAME: 'tos-api'
-  _REGION:       'us-central1'
-
-options:
-  machineType: 'E2_HIGHCPU_8'
-  logging: CLOUD_LOGGING_ONLY
-  dynamic_substitutions: true
+  _REGION:       'us-east1'

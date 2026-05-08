@@ -14,6 +14,7 @@ langchain-huggingface
 langchain-pinecone
 langchain-text-splitters
 pinecone-client
+rank_bm25
 sentence-transformers
 pypdf
 beautifulsoup4

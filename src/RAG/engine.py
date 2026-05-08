@@ -94,15 +94,19 @@ class TOSAssistant:
             logger.info("Desktop mode: ChromaDB at %s", persist_dir)
         else:
             self._pc = PineconeClient(api_key=pinecone_api_key)
-            self._index_name = index_name
+            # Sanitize index name: must be lowercase, no underscores
+            self._index_name = index_name.lower().replace("_", "-").strip()
             self._dimension = dimension
-            self._ensure_pinecone_index(index_name, cloud, region)
-            self._pc_index = self._pc.Index(index_name)
-            logger.info("Server mode: Pinecone index %s", index_name)
+            
+            logger.info("Connecting to Pinecone index: %s", self._index_name)
+            self._ensure_pinecone_index(self._index_name, cloud, region)
+            self._pc_index = self._pc.Index(self._index_name)
+            logger.info("Server mode: Pinecone connected.")
  
     def _ensure_pinecone_index(self, index_name, cloud, region):
         existing = {idx.name for idx in self._pc.list_indexes()}
         if index_name not in existing:
+            logger.info("Creating new Pinecone index: %s", index_name)
             self._pc.create_index(
                 name=index_name,
                 dimension=self._dimension,
@@ -113,6 +117,7 @@ class TOSAssistant:
             while time.time() < deadline:
                 if self._pc.describe_index(index_name).status.get("ready"):
                     return
+                time.sleep(5)
                 time.sleep(2)
             raise EnvironmentError(f"Pinecone index {index_name} not ready.")
 
