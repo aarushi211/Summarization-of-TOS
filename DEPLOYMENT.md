@@ -1,145 +1,205 @@
-# ☁️ Deployment & MLOps Strategy
-This document details the engineering challenges faced and solutions implemented while deploying the TOS-Summarizer to a serverless environment (Google Cloud Run) and Hugging Face Spaces with strict resource constraints.
+# Deployment Guide
 
-## 1. The Inference Engine Challenge (Docker & C++)
-### The Problem
-The project uses `llama.cpp` for efficient inference. However, installing the Python bindings (`llama-cpp-python`) requires compiling C++ code during the Docker build process.
-- **Issue:** On Google Cloud Build (and Hugging Face Spaces free tier), compiling from source took >15 minutes, causing build timeouts.
-- **Error:** Job failed with exit code: `1. Reason: Job timeout`.
+Backend on **Google Cloud Run**, frontend on **Vercel**,
+model artifacts on **Google Cloud Storage**.
 
-### The Solution: Pre-built Wheels
-Instead of compiling from source, I optimized the `Dockerfile` to fetch pre-compiled binary wheels compatible with the Linux container environment.
+---
 
-**Before (Timeouts):**
+## 1. Architecture Overview
+
+### Backend (Cloud Run)
+
+- Containerized FastAPI app (`api/main.py`)
+- Multi-stage Docker build: ~500MB runtime image (CPU-only PyTorch,
+  no model files baked in)
+- Model path at runtime: `/app/models/legal_qwen.Q4_K_M.gguf`
+- Structured JSON logs with `X-Request-ID` correlation
+- LangSmith tracing enabled in production (`LANGCHAIN_TRACING_V2=true`)
+
+### Frontend (Vercel)
+
+- Next.js app (`frontend/`)
+- Calls Cloud Run backend over HTTPS
+- CORS origin controlled by `ALLOWED_ORIGINS` env var on backend
+
+### Model Delivery
+
+Models are stored in a GCS bucket and mounted into Cloud Run at
+`/app/models` via GCSFuse. This keeps the Docker image at ~500MB
+instead of >3GB and allows model updates without image rebuilds.
+
+Two deployment options are documented in the Dockerfile:
+
+| Option | Image size | Cold start | Use case |
+|--------|-----------|------------|----------|
+| GCS mount (current) | ~500MB | ~4m 45s | Portfolio / low cost |
+| Baked into image | >3GB | ~30s | High traffic / production |
+
+---
+
+## 2. Runtime Configuration
+
+As configured in `cloudbuild.yaml`:
+
+| Parameter | Value | Rationale |
+|-----------|-------|-----------|
+| `cpu` | 4 | LLM inference is CPU-bound; more cores reduce token latency |
+| `memory` | 8Gi | Model + embeddings + cross-encoder fit comfortably |
+| `concurrency` | 1 | Single LLM process; concurrent requests would thrash |
+| `timeout` | 300s | Long inference chains can take 60-90s per request |
+| `min-instances` | 0 | Cost optimization for portfolio deployment |
+| `max-instances` | 1 | Prevents runaway cost; single model process anyway |
+| `--cpu-boost` | enabled | Allocates extra CPU during cold start initialization |
+| `--execution-environment` | gen2 | Required for GCS volume mounts |
+
+---
+
+## 3. CI/CD Pipeline (`cloudbuild.yaml`)
+1. Pull cache     → docker pull :latest (|| true — safe on first run)
+2. Build          → docker build with --cache-from for layer reuse
+3. Push           → push :$BUILD_ID and :latest tags
+4. Deploy         → gcloud run deploy --no-traffic --tag candidate
+5. Smoke test     → scripts/smoke-test.sh hits tagged revision URL
+6. Migrate        → update-traffic --to-tags candidate=100
+
+Key properties:
+- `--no-traffic` on deploy means the new revision serves zero requests
+  until smoke test passes
+- Tagged revisions get a stable URL (`candidate---...run.app`) for
+  testing without affecting live traffic
+- If smoke test fails, Cloud Build exits non-zero and traffic migration
+  never runs — old revision keeps serving
+
+**Note:** `--no-traffic` fails if the Cloud Run service does not yet
+exist. On first deploy to a new region, deploy manually once without
+`--no-traffic`, then use Cloud Build for all subsequent deploys.
+
+---
+
+## 4. Secrets Management
+
+All secrets stored in GCP Secret Manager, injected at runtime via
+`--set-secrets`. Secret names match env var names 1:1.
+
+Required secrets:
 ```
-RUN apt-get install build-essential
-RUN pip install llama-cpp-python  # Triggers compilation
-```
-
-**After (Builds in <2 mins):**
-```
-# Use pre-built binary for CPU
-RUN pip install llama-cpp-python \
-    --extra-index-url [https://abetlen.github.io/llama-cpp-python/whl/cpu](https://abetlen.github.io/llama-cpp-python/whl/cpu)
-```
-
-## 2. Resource Constraints (RAM & Quantization)
-### The Problem
-Standard serverless instances (Cloud Run Gen 1) default to 512MB - 1GB RAM.
-- **Mistral 7B (FP16):** ~15 GB VRAM. Impossible to deploy cheaply.
-- **Mistral 7B (Quantized Q8):** ~7.5 GB RAM. Still requires expensive custom instances or GPU tiers.
-
-### The Solution: Aggressive Distillation & Quantization
-I implemented a pipeline to distill knowledge into a smaller architecture (Qwen 1.5B) and quantized it to 4-bit GGUF.
-| Model | Format | Size | Deployment Status |
-| ------ | ------- | ------- | --------------|
-| Mistral 7B | GGUF (Q8) | ~7.5 GB | Local Only (Too heavy for free tier hosting) |
-| Qwen 1.5B | GGUF (Q4_K_M) | < 1 GB | Deployed (Fits easily in 2GB container) |
-
-By pivoting to the 1.5B model, I reduced the artifact size by ~87%, allowing deployment on standard CPU instances without crashing.
-
-## 3. Cold Starts vs. Cost Optimization
-### The Trade-off
-Serverless containers "scale to zero" when idle. The first user request triggers a "Cold Start," where the container boots up and loads the model into memory.
-- **Optimized for Performance:** Setting `--min-instances 1` keeps the container warm (latency <5s) but consumes cloud credits 24/7.
-- **Optimized for Cost:** Setting `--min-instances 0` kills the container when unused.
-
-### Final Decision: Scale to Zero
-For this portfolio project, I prioritized cost efficiency. I configured the service to scale to zero.
-- **Trade-off:** The first request takes ~30-40 seconds to spin up the container and load the model.
-- **Benefit:** Zero cost when the app is idle.
-
-## 4. Deployment Architecture
-I utilized a dual-deployment strategy to ensure accessibility:
-
-1. **Hugging Face Spaces (Demo):**
-    - Hosts an earlier checkpoint of the Qwen 1.5B model.
-    - Serves as a permanent, always-available public demo.
-
-2. **Google Cloud Run (Production):**
-    - Hosts the latest fine-tuned Qwen 1.5B model.
-    - Demonstrates a production-ready Dockerized Streamlit App.
-
-## 🛠️ Command Cheat Sheet
-
-This section serves as a runbook for building, testing, and deploying the application.
-> Note: Deployment configurations (such as cloudbuild.yaml and production Dockerfiles) are maintained in the deploy branch. Please checkout that branch before executing deployment commands.
-
-### 1. Local Docker Testing
-Before deploying, validate the container locally to debug port mappings and model loading.
-```
-# Build the image locally
-# -f app/Dockerfile: Use the specific Cloud Run config
-# -t tos-local: Tag it with a name
-docker build -f app/Dockerfile -t tos-local .
-
-# Run the container
-# Maps laptop port 9000 -> container port 8080
-docker run -p 9000:8080 tos-local
-
-# Access App: http://localhost:9000
-
-# Debugging Commands
-docker ps                       # See running containers
-docker logs <CONTAINER_ID>      # Check for Python/Model errors
-docker rm -f <CONTAINER_ID>     # Force stop a container
-```
-
-
-### 2. Google Cloud Setup (One-Time)
-Initialize the project and enable required serverless components.
-```
-# 1. Login & Set Project
-gcloud auth login
-gcloud config set project tos-summarization
-
-# 2. Enable APIs (Compute, Registry, Build)
-gcloud services enable run.googleapis.com artifactregistry.googleapis.com cloudbuild.googleapis.com
-
-# 3. Create Artifact Repository
-gcloud artifacts repositories create tos-repo \
-    --repository-format=docker \
-    --location=us-central1 \
-    --description="Docker repository for TOS Summarizer"
-
-# 4. Authenticate Docker
-gcloud auth configure-docker us-central1-docker.pkg.dev
+PINECONE_API_KEY
+PINECONE_INDEX_NAME
+SUPABASE_URL
+SUPABASE_ANON_KEY
+SUPABASE_SERVICE_KEY
+AWS_ACCESS_KEY_ID
+AWS_SECRET_ACCESS_KEY
+AWS_S3_BUCKET_NAME
+LANGCHAIN_API_KEY
+ADMIN_SECRET
 ```
 
+**Known gotcha:** Secrets created by pasting values in a terminal or
+from files with trailing newlines will include `\r\n` in the stored
+value. This causes HTTP header validation errors at runtime
+(`Invalid header value`). Always verify with:
 
-### 3. Production Deployment (Repeatable)
-Deploy updates to the live service.
-
-**Step A: Build & Push Image**
-
-Using Cloud Build avoids local bandwidth bottlenecks when uploading large model files.
-```
-# Direct Build
-gcloud builds submit --file app/Dockerfile --tag us-central1-docker.pkg.dev/[PROJECT_ID]/tos-repo/tos-streamlit:v1 .
-
-# Alternative: Using cloudbuild.yaml
-# gcloud builds submit --config cloudbuild.yaml .
+```bash
+gcloud secrets versions access latest --secret=SECRET_NAME | xxd | tail -1
 ```
 
+Clean value should show no `0d 0a` bytes at the end.
 
-**Step B: Deploy Service**
+---
 
-Deploy with custom resource limits for NLP workloads.
-```
-gcloud run deploy tos-demo \
-    --image us-central1-docker.pkg.dev/[PROJECT_ID]/tos-repo/tos-streamlit:v1 \
-    --region us-central1 \
-    --platform managed \
-    --allow-unauthenticated \
-    --port 8080 \
-    --memory 4Gi \
-    --cpu 2 \
-    --min-instances 0
+## 5. Common Failure Modes
+
+### Container fails to start on port 8080
+
+Cause: App crashes during lifespan startup before binding the port.
+
+Check logs for the actual error before the traceback:
+```bash
+gcloud logging read \
+  'resource.type="cloud_run_revision" AND resource.labels.revision_name="REVISION"' \
+  --project=PROJECT_ID --limit=100 --order=asc \
+  --format="table(timestamp,severity,textPayload)"
 ```
 
+Common causes:
+- Secret has trailing whitespace (`\r\n`) — see Section 4
+- Secret value is wrong (wrong index name, invalid characters)
+- Model file not found at `/app/models/...` — check GCS bucket contents
+  and mount path
 
-**Step C: Cost Management**
-If testing min-instances 1 for a demo, use this to reset it to 0 (Cold Start mode) to stop credit consumption.
+### `--no-traffic` fails on deploy
+
+Cause: Service does not exist yet in that region.
+
+Fix: Deploy manually once without `--no-traffic` to bootstrap the
+service, then use Cloud Build for all future deploys.
+
+### GCS volume mount fails
+
+Cause: Missing `--execution-environment gen2`.
+
+Fix: Ensure `gen2` is set in deploy args. Also confirm the Cloud Run
+service account has `roles/storage.objectViewer` on the bucket.
+
+### Smoke test fails to reach tagged revision
+
+Cause: URL constructed incorrectly — tagged revision URL format differs
+from service URL.
+
+Fix: Derive the tagged URL from `gcloud run services describe` output,
+not by constructing it manually.
+
+---
+
+## 6. Observability
+
+**Cloud Logging** (structured JSON):
+```bash
+gcloud logging read \
+  "resource.type=cloud_run_revision AND resource.labels.service_name=tos-api" \
+  --project=tos-summarization \
+  --limit=50 \
+  --format="table(timestamp,severity,jsonPayload.message,jsonPayload.request_id)"
 ```
-gcloud run services update tos-demo --min-instances 0 --region us-central1
-```
+
+**LangSmith:** LLM call traces available at https://smith.langchain.com
+under project `tos-summarizer-prod`.
+
+**Request tracing:** Every request gets an `X-Request-ID` header
+(visible in response). Use this to correlate frontend errors with
+backend logs.
+
+---
+
+## 7. Cost vs UX Tradeoffs
+
+| Mode | Config | Cold start | Monthly cost (est.) |
+|------|--------|------------|---------------------|
+| Portfolio (current) | min-instances=0 | ~4m 45s | ~$0-5 |
+| Warmed | min-instances=1 | ~30s | ~$30-50 |
+| Baked image + warmed | min-instances=1 + image bake | ~15s | ~$30-50 |
+
+Current config accepts cold starts to keep costs near zero for a
+portfolio deployment with infrequent traffic.
+
+---
+
+## 8. Frontend (Vercel)
+
+- Set `NEXT_PUBLIC_API_URL` to your Cloud Run service URL
+- Add Vercel production and preview domains to backend `ALLOWED_ORIGINS`
+- Vercel handles CDN and static asset caching automatically
+
+---
+
+## 9. Re-deploying to a New Region
+
+Checklist:
+1. Create Artifact Registry repo in new region
+2. Create GCS bucket in new region and copy model files
+3. Grant Cloud Run service account `objectViewer` on new bucket
+4. Replicate all secrets in Secret Manager (verify no trailing newlines)
+5. Bootstrap with manual `gcloud run deploy` (no `--no-traffic`)
+6. Update `cloudbuild.yaml` substitution defaults
+7. Subsequent deploys via `gcloud builds submit`
