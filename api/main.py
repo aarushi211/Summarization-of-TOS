@@ -1,3 +1,4 @@
+import asyncio
 import time
 import uuid
 import logging
@@ -74,14 +75,29 @@ _configure_logging()
 logger = logging.getLogger(__name__)
 
 
+async def _warm_assistant() -> None:
+    try:
+        await asyncio.to_thread(init_assistant)
+        logger.info("assistant initialized", extra={"event": "assistant_ready"})
+    except Exception:
+        logger.exception("assistant initialization failed", extra={"event": "assistant_init_failed"})
+
+
 # ── App lifespan ──────────────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Core essentials load fast
     init_db()
     init_storage()
-    init_assistant()
-    logger.info("startup complete", extra={"event": "startup"})
+    logger.info("core startup complete", extra={"event": "startup_core_complete"})
+
+    # Fire-and-forget assistant warmup after the app has started.
+    app.state.assistant_warmup_task = asyncio.create_task(_warm_assistant())
     yield
+    
+    warmup_task = getattr(app.state, "assistant_warmup_task", None)
+    if warmup_task and not warmup_task.done():
+        warmup_task.cancel()
     logger.info("shutdown", extra={"event": "shutdown"})
 
 
@@ -162,5 +178,6 @@ async def health():
     return {
         "status": "healthy",
         "version": settings.VERSION,
+        "debug": settings.DEBUG,
         "model_ready": database.shared_assistant is not None,
     }
