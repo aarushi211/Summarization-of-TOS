@@ -14,6 +14,7 @@ Outputs:
 """
 
 import os
+import re
 import sys
 import time
 import platform
@@ -30,6 +31,8 @@ if sys.platform == "win32":
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent.parent
 sys.path.append(str(PROJECT_ROOT))
+
+from src.RAG.schemas import SessionState
 
 
 def get_memory_rss_mb():
@@ -112,8 +115,14 @@ def run_benchmark():
 
     t_total_start = time.perf_counter()
 
-    from src.RAG.rag_pipeline import TOSAssistant
-    rag = TOSAssistant(model_path)
+    from src.RAG.engine import TOSAssistant
+    # Use local mode for benchmark to avoid network noise
+    rag = TOSAssistant(
+        model_path=model_path,
+        pinecone_api_key="",
+        use_local_vectorstore=True,
+        data_dir=str(PROJECT_ROOT / "data" / "benchmark_chroma")
+    )
 
     t_init_done = time.perf_counter()
     total_init_time = t_init_done - t_total_start
@@ -139,15 +148,18 @@ def run_benchmark():
     print_section("Phase 2: Document Ingestion & Global Summarization")
 
     test_csv = PROJECT_ROOT / "data" / "Test_data.csv"
-    tos_dir = PROJECT_ROOT / "data" / "TOS_files"
+    tos_dir = PROJECT_ROOT / "data" / "TOS files"
 
     if not test_csv.exists():
         print(f"  ✗ Test data not found at {test_csv}")
         return
+    if not tos_dir.exists():
+        print(f"  ✗ TOS directory not found at {tos_dir}")
+        return
 
     df = pd.read_csv(test_csv)
-    pdf_files = sorted(tos_dir.glob("*.pdf"))
-    print(f"  Found {len(pdf_files)} PDF documents, {len(df)} test questions\n")
+    doc_files = sorted(tos_dir.glob("*.pdf"))
+    print(f"  Found {len(doc_files)} PDF documents, {len(df)} test questions\n")
 
     detailed_rows = []
 
@@ -160,21 +172,30 @@ def run_benchmark():
             "latency_s": m["latency_s"],
         })
 
-    for pdf_path in pdf_files:
-        pdf_name = pdf_path.name
-        print(f"  📄 {pdf_name}")
+    for doc_path in doc_files:
+        doc_name = doc_path.name
+        print(f"  📄 {doc_name}")
 
         # Reset metrics for clean per-doc tracking
         rag.reset_metrics()
 
         # --- Ingestion ---
-        rag.ingest_document(str(pdf_path))
+        # Create a new session state for this document
+        safe_name = re.sub(r"[^a-zA-Z0-9._-]", "-", doc_name)  # replace illegal chars
+        safe_name = re.sub(r"-{2,}", "-", safe_name).strip("-")   # collapse/trim dashes
+        state = SessionState(pinecone_namespace=f"bm-{safe_name[:60]}")
+
+        # --- Ingestion ---
+        if doc_path.suffix == ".pdf":
+            rag.ingest_document(str(doc_path), state)
+        else:
+            rag.ingest_text_file(str(doc_path), state)
 
         # Find service name/doc_type from test data
-        doc_rows = df[df["filename"] == pdf_name]
+        doc_rows = df[df["filename"] == doc_name]
         if len(doc_rows) > 0:
-            rag.service_name = doc_rows.iloc[0].get("service_name", "Unknown")
-            rag.doc_type = doc_rows.iloc[0].get("doc_type", "Document")
+            state.service_name = doc_rows.iloc[0].get("service_name", "Unknown")
+            state.doc_type = doc_rows.iloc[0].get("doc_type", "Document")
 
         ingest_metrics = [m for m in rag.get_metrics() if m.get("stage") == "ingest_document"]
         if ingest_metrics:
@@ -189,7 +210,7 @@ def run_benchmark():
             
             detailed_rows.append({
                 "operation": "ingest_document",
-                "document": pdf_name,
+                "document": doc_name,
                 "sub_stage": "total",
                 "latency_s": im.get("total_ingest_s", 0),
                 "pdf_parse_s": im.get("pdf_parse_s", 0),
@@ -202,7 +223,7 @@ def run_benchmark():
             })
 
         # --- Global Summary ---
-        summary = rag.generate_global_summary()
+        summary = rag.generate_global_summary(state)
 
         summary_metrics = [m for m in rag.get_metrics() if m.get("stage") == "global_summary"]
         if summary_metrics:
@@ -229,7 +250,7 @@ def run_benchmark():
 
             detailed_rows.append({
                 "operation": "global_summary",
-                "document": pdf_name,
+                "document": doc_name,
                 "sub_stage": "total",
                 "latency_s": sm.get("total_summary_s", 0),
                 "llm_inference_s": sm.get("llm_inference_s", 0),
@@ -248,7 +269,7 @@ def run_benchmark():
             rag.reset_metrics()  # Keep clean per-question
             # Re-add init metrics since reset preserves them
             
-            result = rag.answer_question(question)
+            result = rag.answer_question(question, state)
 
             qa_metrics = [m for m in rag.get_metrics() if m.get("stage") == "qa_inference"]
             if qa_metrics:
@@ -261,7 +282,7 @@ def run_benchmark():
 
                 detailed_rows.append({
                     "operation": "qa_inference",
-                    "document": pdf_name,
+                    "document": doc_name,
                     "query": question[:80],
                     "sub_stage": "total",
                     "latency_s": qm.get("total_qa_s", 0),

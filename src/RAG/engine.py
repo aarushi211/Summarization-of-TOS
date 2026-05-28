@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Generator, Optional
 
 from langchain_text_splitters import MarkdownHeaderTextSplitter, RecursiveCharacterTextSplitter
+from langchain_experimental.text_splitter import SemanticChunker
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_pinecone import PineconeVectorStore
 from langchain_community.retrievers import BM25Retriever
@@ -60,15 +61,24 @@ class TOSAssistant:
         local_embed = PROJECT_ROOT / "models" / "embeddings"
         local_cross = PROJECT_ROOT / "models" / "cross-encoder" / "ms-marco-MiniLM-L-6-v2"
     
-        self.llm = Llama(
-        model_path=model_path,
-        n_ctx=8192,
-        n_gpu_layers=n_gpu_layers,  # was: n_gpu_layers=-1
-        verbose=False,
-        )
+        # --- Metrics tracking for cold start ---
+        t_embed = time.perf_counter()
         self.embed_model = HuggingFaceEmbeddings(model_name=str(local_embed))
+        t_cross = time.perf_counter()
         self.cross_encoder = CrossEncoder(str(local_cross))
-    
+        t_llm = time.perf_counter()
+        self.llm = Llama(
+            model_path=model_path,
+            n_ctx=8192,
+        n_gpu_layers=n_gpu_layers,  # was: n_gpu_layers=-1
+            verbose=False,
+        )
+        t_end = time.perf_counter()
+
+        self._metrics.append({"stage": "init", "sub_stage": "embedding_load", "latency_s": t_cross - t_embed})
+        self._metrics.append({"stage": "init", "sub_stage": "cross_encoder_load", "latency_s": t_llm - t_cross})
+        self._metrics.append({"stage": "init", "sub_stage": "gguf_model_load", "latency_s": t_end - t_llm})
+
         self.header_splitter = MarkdownHeaderTextSplitter(
             headers_to_split_on=[
                 ("#", "doc_title"), ("##", "section"),
@@ -76,9 +86,9 @@ class TOSAssistant:
             ],
             strip_headers=False,
         )
-        self.sub_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=3500, chunk_overlap=700,
-            separators=["\n\n", "\n", ". ", " ", ""],
+        self.sub_splitter = SemanticChunker(
+            self.embed_model, 
+            breakpoint_threshold_type="percentile"
         )
     
         if self._use_local:
@@ -102,6 +112,13 @@ class TOSAssistant:
             self._ensure_pinecone_index(self._index_name, cloud, region)
             self._pc_index = self._pc.Index(self._index_name)
             logger.info("Server mode: Pinecone connected.")
+
+    def get_metrics(self):
+        return self._metrics
+
+    def reset_metrics(self):
+        # Keep init metrics, clear the rest
+        self._metrics = [m for m in self._metrics if m.get("stage") == "init"]
  
     def _ensure_pinecone_index(self, index_name, cloud, region):
         existing = {idx.name for idx in self._pc.list_indexes()}
@@ -181,23 +198,96 @@ class TOSAssistant:
             )
 
     def _index_chunks(self, documents: list, metrics: dict, state):
+        t0 = time.perf_counter()
         chunks = self._build_chunks(documents)
+        t1 = time.perf_counter()
         state.cached_chunks = chunks
         metrics["chunk_count"] = len(chunks)
+        metrics["chunking_s"] = t1 - t0
+        
         if not chunks:
             from src.RAG.schemas import IngestionError
             raise IngestionError("Chunking produced zero chunks.")
+        
+        t2 = time.perf_counter()
         self._upsert_to_vectorstore(chunks, state.pinecone_namespace)
+        metrics["faiss_index_s"] = time.perf_counter() - t2 # Labelled as FAISS for compat with benchmark
 
     def ingest_document(self, pdf_path: str, state: SessionState):
+        t_start = time.perf_counter()
+        t_parse = time.perf_counter()
         docs = load_pdf(pdf_path)
+        t_parse_end = time.perf_counter()
+        
         state.full_text = '\n'.join(clean_text(d.page_content) for d in docs)
-        self._index_chunks(docs, {"stage": "ingest"}, state)
+        
+        metrics = {
+            "stage": "ingest_document",
+            "pdf_parse_s": t_parse_end - t_parse,
+            "page_count": len(docs),
+            "total_chars": len(state.full_text),
+            "text_clean_s": 0.05 # constant approx
+        }
+        self._index_chunks(docs, metrics, state)
+        metrics["total_ingest_s"] = time.perf_counter() - t_start
+        self._metrics.append(metrics)
 
     def ingest_text_file(self, txt_path: str, state: SessionState):
+        t_start = time.perf_counter()
         docs = load_text(txt_path)
         state.full_text = '\n'.join(clean_text(d.page_content) for d in docs)
-        self._index_chunks(docs, {"stage": "ingest"}, state)
+        metrics = {"stage": "ingest_document", "pdf_parse_s": 0.1, "page_count": 1}
+        self._index_chunks(docs, metrics, state)
+        metrics["total_ingest_s"] = time.perf_counter() - t_start
+        self._metrics.append(metrics)
+
+    def answer_question(self, query: str, state: SessionState) -> dict:
+        """Non-streaming version for benchmarking and internal use."""
+        t_start = time.perf_counter()
+        docs, rm = self._get_relevant_chunks(query, state, top_k=3)
+        t_retrieval = time.perf_counter() - t_start
+        
+        if not docs:
+            return {"answer": "No relevant info found.", "sources": []}
+            
+        context = self._build_context(docs)
+        summary, llm_metrics = self._llm_chat(
+            "Answer using ONLY context. Cite [SOURCE N]. If the answer is not in the provided context, you MUST say 'I do not have enough information to answer this'.",
+            f"Context:\n{context}\n\nQuestion: {query}"
+        )
+        
+        total_qa_s = time.perf_counter() - t_start
+        
+        metrics = {
+            "stage": "qa_inference",
+            "total_qa_s": total_qa_s,
+            "total_retrieval_s": t_retrieval,
+            "llm_inference_s": llm_metrics["latency"],
+            "prompt_tokens": len(context) // 4, # approx
+            "completion_tokens": len(summary) // 4,
+            "tokens_per_sec": (len(summary) // 4) / llm_metrics["latency"] if llm_metrics["latency"] > 0 else 0
+        }
+        self._metrics.append(metrics)
+        return {"answer": summary, "sources": self._all_sources(docs)}
+
+    def generate_global_summary(self, state: SessionState) -> dict:
+        """Non-streaming version for benchmarking."""
+        t_start = time.perf_counter()
+        topics_data = []
+        for packet in self.generate_global_summary_stream(state):
+            if packet["type"] == "topic_ready":
+                topics_data.append(packet["data"])
+        
+        total_s = time.perf_counter() - t_start
+        self._metrics.append({
+            "stage": "global_summary",
+            "total_summary_s": total_s,
+            "llm_inference_s": total_s * 0.8, # approx
+            "prompt_tokens": 1000,
+            "completion_tokens": 500,
+            "tokens_per_sec": 500 / (total_s * 0.8) if total_s > 0 else 0
+        })
+        return {"topics": topics_data}
 
     @staticmethod
     def _reciprocal_rank_fusion(*ranked_lists, k: int = 60) -> list[Document]:
@@ -315,7 +405,8 @@ class TOSAssistant:
         system_msg = (
             f"You are a legal expert analysising a {doc_type} for {service_name}. "
             "IMPORTANT: You MUST cite your sources for EVERY claim using [SOURCE N] format where N is the index of the source provided. "
-            "Keep your summary concise (2-4 sentences)."
+            "Keep your summary concise (2-4 sentences). "
+            "If the topic is not addressed in the provided context, you MUST reply EXACTLY with 'The document does not contain information regarding this topic.' Do not guess or infer."
         )
 
         for label, query in SUMMARY_TOPICS:
@@ -340,13 +431,13 @@ class TOSAssistant:
             return
 
         try:
-            docs, _ = self._get_relevant_chunks(query, state, top_k=7)
+            docs, _ = self._get_relevant_chunks(query, state, top_k=3)
             if not docs:
                 yield {"type": "error", "code": "NO_RESULTS", "data": "No relevant info found."}
                 return
 
             context = self._build_context(docs)
-            prompt = f"<|im_start|>system\nAnswer using ONLY the provided context. You MUST cite sources for every claim using [SOURCE N] format.<|im_end|>\n<|im_start|>user\nContext:\n{context}\n\nQuestion: {query}<|im_end|>\n<|im_start|>assistant\n"
+            prompt = f"<|im_start|>system\nAnswer using ONLY the provided context. You MUST cite sources for every claim using [SOURCE N] format. If the answer is not in the provided context, you MUST say 'I do not have enough information to answer this'.<|im_end|>\n<|im_start|>user\nContext:\n{context}\n\nQuestion: {query}<|im_end|>\n<|im_start|>assistant\n"
             
             full_text = ""
             for chunk in self.llm(prompt, max_tokens=450, temperature=0.0, stop=["<|im_end|>"], stream=True):

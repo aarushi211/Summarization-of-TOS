@@ -135,6 +135,7 @@ without any cloud dependencies.
 ```text
 api/                 FastAPI app, routers, config, security, middleware
 src/RAG/             Retrieval and generation pipeline
+src/Evaluation/      Adversarial red team, context recall, faithfulness, answer relevance, RAGAS pipeline
 frontend/            Next.js frontend
 tests/               API and RAG pipeline tests
 cloudbuild.yaml      CI/CD: build → push → deploy → smoke test → migrate
