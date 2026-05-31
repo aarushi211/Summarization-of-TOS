@@ -30,6 +30,7 @@ class SessionState:
     service_name:       str   = "Unknown Service"
     doc_type:           str   = "Unknown Document"
     full_text:          str   = ""
+    page_count:         int   = 0
     last_accessed:      float = dataclasses.field(default_factory=time.time)
     cached_chunks:      list  = dataclasses.field(default_factory=list)
 
@@ -43,6 +44,7 @@ class SessionState:
         self.service_name       = "Unknown Service"
         self.doc_type           = "Unknown Document"
         self.full_text          = ""
+        self.page_count         = 0
         self.cached_chunks      = []
 
 SUMMARY_TOPICS = [

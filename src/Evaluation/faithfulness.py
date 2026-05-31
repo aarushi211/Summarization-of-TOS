@@ -7,7 +7,9 @@ Metric
 ------
 Faithfulness = supported_claims / total_claims
 
-For each (retrieved context, generated answer) pair:
+For each (generated answer, grounding context) pair:
+  Grounding context is the full retrieved chunk text passed to the QA model
+  (result["context"] from answer_question), not truncated UI excerpts.
   1. Send context + answer to an LLM judge in a single structured prompt.
   2. The judge identifies individual claims and verdicts each:
        supported    → claim is directly backed by the context
@@ -283,6 +285,7 @@ def _safe_ns(filename: str, prefix: str = "faith") -> str:
 
 
 def _sources_to_context(sources: list[dict]) -> str:
+    """Fallback: short UI excerpts only. Prefer result['context'] from answer_question."""
     return " ".join(s.get("excerpt", "") for s in sources)
 
 
@@ -336,8 +339,10 @@ def _eval_qa(rag, judge, df: pd.DataFrame, pdf_files: list, claim_rows: list,
                 continue
 
             answer  = result.get("answer", "")
-            sources = result.get("sources", [])
-            context = _sources_to_context(sources)
+            # Same full chunks the QA model saw (not 400-char source excerpts for the UI).
+            context = (result.get("context") or "").strip() or _sources_to_context(
+                result.get("sources", [])
+            )
 
             if not answer or not context:
                 continue

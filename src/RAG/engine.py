@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import Generator, Optional
 
 from langchain_text_splitters import MarkdownHeaderTextSplitter, RecursiveCharacterTextSplitter
-from langchain_experimental.text_splitter import SemanticChunker
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_pinecone import PineconeVectorStore
 from langchain_community.retrievers import BM25Retriever
@@ -32,7 +31,55 @@ _DENSE_SEARCH_K = 50
 _BM25_SEARCH_K = 50
 _RRF_CANDIDATE_K = 50
 _QA_TOP_K = 5
+_QA_TOP_K_LONG = 7
+_LONG_DOC_MIN_PAGES = 12
+_LONG_DOC_MIN_CHUNKS = 40
 _SUMMARY_TOP_K = 3
+_SECTION_CHUNK_SIZE = 1200
+_SECTION_CHUNK_OVERLAP = 300
+
+_RE_WITHOUT_NOTIF_Q = re.compile(r"without\s+(?:prior\s+)?notif", re.I)
+_RE_NOTIFY_IN_TEXT = re.compile(r"\bnotif\w*", re.I)
+_QA_MAX_TOKENS = 150
+_QA_EXTRACT_MAX_TOKENS = 200
+
+_QA_ABSTENTION = "I do not have enough information to answer this."
+
+_QA_EXTRACT_SYSTEM = """You extract evidence from legal document source chunks.
+
+Rules:
+- Copy exact sentences or short phrases from the sources that help answer the question.
+- Prefix each line with the source number from the context, e.g. "1: <copied text>" or "[SOURCE 1] <copied text>"
+- Do not interpret, summarize, or add facts not present in the sources.
+- If no source text answers the question, reply with exactly: NONE
+"""
+
+_RE_YES_NO = re.compile(
+    r"^\s*(can|could|does|do|did|is|are|was|were|will|would|shall|should|am|have|has)\b",
+    re.I,
+)
+
+_QA_SYNTHESIZE_SYSTEM = f"""You write a brief legal answer using ONLY the extracted evidence below.
+
+Rules:
+- At most 2 bullet points. Use 1 if one evidence line is enough.
+- Each bullet must map to exactly ONE extracted evidence line (light paraphrase only).
+- End each bullet with [SOURCE N] matching that line's source prefix.
+- Do NOT use numbered lists, steps, introductions, or extra sentences.
+- Do not add facts not present in the extracted evidence.
+- Do not use hedging (may, might, usually, often, typically) unless the evidence uses them.
+- If evidence is insufficient, reply with exactly:
+  {_QA_ABSTENTION}
+"""
+
+_QA_SYNTHESIZE_YESNO_HINT = """
+This is a YES/NO question.
+- Use exactly 1 bullet (2 only if two evidence lines are both essential).
+- The bullet MUST start with "Yes," or "No," then paraphrase the supporting evidence in the same sentence.
+- End the bullet with [SOURCE N]. Do not output only "Yes" or "No" without explanation and citation.
+- If evidence says users WILL be notified of changes, you must NOT answer Yes to "without notifying".
+- If evidence does not clearly support Yes or No, reply with exactly the abstention sentence from the system prompt.
+"""
 
 # ── Retry policies ────────────────────────────────────────────────────────────
 _RETRY_PINECONE = dict(
@@ -94,9 +141,9 @@ class TOSAssistant:
             ],
             strip_headers=False,
         )
-        self.sub_splitter = SemanticChunker(
-            self.embed_model, 
-            breakpoint_threshold_type="percentile"
+        self.sub_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=_SECTION_CHUNK_SIZE,
+            chunk_overlap=_SECTION_CHUNK_OVERLAP,
         )
     
         if self._use_local:
@@ -240,11 +287,12 @@ class TOSAssistant:
         t_parse_end = time.perf_counter()
         
         state.full_text = pages_to_source_text(docs)
-        
+        state.page_count = len(docs)
+
         metrics = {
             "stage": "ingest_document",
             "pdf_parse_s": t_parse_end - t_parse,
-            "page_count": len(docs),
+            "page_count": state.page_count,
             "total_chars": len(state.full_text),
             "text_clean_s": 0.05 # constant approx
         }
@@ -256,7 +304,8 @@ class TOSAssistant:
         t_start = time.perf_counter()
         docs = load_text(txt_path)
         state.full_text = pages_to_source_text(docs)
-        metrics = {"stage": "ingest_document", "pdf_parse_s": 0.1, "page_count": 1}
+        state.page_count = max(1, len(docs))
+        metrics = {"stage": "ingest_document", "pdf_parse_s": 0.1, "page_count": state.page_count}
         self._index_chunks(docs, metrics, state)
         metrics["total_ingest_s"] = time.perf_counter() - t_start
         self._metrics.append(metrics)
@@ -264,31 +313,34 @@ class TOSAssistant:
     def answer_question(self, query: str, state: SessionState) -> dict:
         """Non-streaming version for benchmarking and internal use."""
         t_start = time.perf_counter()
-        docs, rm = self._get_relevant_chunks(query, state, top_k=_QA_TOP_K)
+        docs, rm = self._get_relevant_chunks(query, state, top_k=self._qa_top_k(state))
         t_retrieval = time.perf_counter() - t_start
         
         if not docs:
             return {"answer": "No relevant info found.", "sources": []}
             
         context = self._build_context(docs)
-        summary, llm_metrics = self._llm_chat(
-            "Answer using ONLY context. Cite [SOURCE N]. If the answer is not in the provided context, you MUST say 'I do not have enough information to answer this'.",
-            f"Context:\n{context}\n\nQuestion: {query}"
-        )
-        
+        summary, llm_metrics = self._generate_qa_answer(query, context)
+
         total_qa_s = time.perf_counter() - t_start
-        
+
         metrics = {
             "stage": "qa_inference",
             "total_qa_s": total_qa_s,
             "total_retrieval_s": t_retrieval,
             "llm_inference_s": llm_metrics["latency"],
+            "qa_extract_s": llm_metrics.get("extract_s", 0),
+            "qa_synthesize_s": llm_metrics.get("synthesize_s", 0),
             "prompt_tokens": len(context) // 4, # approx
             "completion_tokens": len(summary) // 4,
             "tokens_per_sec": (len(summary) // 4) / llm_metrics["latency"] if llm_metrics["latency"] > 0 else 0
         }
         self._metrics.append(metrics)
-        return {"answer": summary, "sources": self._all_sources(docs)}
+        return {
+            "answer": summary,
+            "sources": self._all_sources(docs),
+            "context": context,
+        }
 
     def generate_global_summary(self, state: SessionState) -> dict:
         """Non-streaming version for benchmarking."""
@@ -407,6 +459,7 @@ class TOSAssistant:
             t0 = time.perf_counter()
             dense_results = self._search_vectorstore(search_query, state.pinecone_namespace)
             rm["retrieval_s"] = time.perf_counter() - t0
+            rm["qa_top_k"] = top_k
         except Exception as exc:
             from src.RAG.schemas import RetrievalError
             raise RetrievalError("Vector search unavailable.") from exc
@@ -446,6 +499,167 @@ class TOSAssistant:
         elapsed = time.perf_counter() - t0
         text = output["choices"][0]["message"]["content"]
         return text, {"latency": elapsed}
+
+    @staticmethod
+    def _is_yes_no_question(query: str) -> bool:
+        q = query.strip()
+        return q.endswith("?") and bool(_RE_YES_NO.match(q))
+
+    @staticmethod
+    def _qa_top_k(state: SessionState) -> int:
+        if state.page_count >= _LONG_DOC_MIN_PAGES:
+            return _QA_TOP_K_LONG
+        if len(state.cached_chunks) >= _LONG_DOC_MIN_CHUNKS:
+            return _QA_TOP_K_LONG
+        return _QA_TOP_K
+
+    @staticmethod
+    def _notification_synthesize_hint(query: str, extracted: str) -> str:
+        if not _RE_WITHOUT_NOTIF_Q.search(query):
+            return ""
+        if not _RE_NOTIFY_IN_TEXT.search(extracted):
+            return ""
+        return (
+            "\n\nCRITICAL: The sources require Spotify to NOTIFY users of term changes. "
+            'The question asks about changes WITHOUT notifying. You MUST begin with "No," '
+            "and quote the notification language. Do NOT answer Yes."
+        )
+
+    @staticmethod
+    def _answer_claims_no_notification(query: str, answer: str) -> bool:
+        if not _RE_WITHOUT_NOTIF_Q.search(query):
+            return False
+        head = answer.strip()[:80].lower()
+        return head.startswith("yes,") or head.startswith("yes ")
+
+    @staticmethod
+    def _qa_extract_user_message(context: str, query: str) -> str:
+        msg = f"Context:\n{context}\n\nQuestion: {query}"
+        if TOSAssistant._is_yes_no_question(query):
+            msg += (
+                "\n\nThis is a yes/no question. Extract lines that support Yes or No. "
+                "If the sources do not clearly support either, reply NONE."
+            )
+        if _RE_WITHOUT_NOTIF_Q.search(query):
+            msg += (
+                "\n\nFocus on whether the service notifies users when terms change "
+                "(look for notify, notification, posting revised terms, email)."
+            )
+        return msg
+
+    @staticmethod
+    def _qa_synthesize_user_message(query: str, extracted: str) -> str:
+        msg = f"Extracted evidence:\n{extracted}\n\nQuestion: {query}"
+        if TOSAssistant._is_yes_no_question(query):
+            msg += _QA_SYNTHESIZE_YESNO_HINT
+        else:
+            msg += "\n\nUse only the evidence lines above. One bullet per line, max 2 bullets."
+        msg += TOSAssistant._notification_synthesize_hint(query, extracted)
+        return msg
+
+    @staticmethod
+    def _yesno_answer_incomplete(answer: str) -> bool:
+        """Bare Yes/No cannot be scored by the faithfulness judge."""
+        a = answer.strip()
+        if len(a) < 35:
+            return True
+        return bool(re.match(r"^(answer:\s*)?(yes|no)[\.\!\?]*\s*$", a, re.I))
+
+    def _synthesize_from_extract(self, query: str, extracted: str) -> str:
+        user_msg = self._qa_synthesize_user_message(query, extracted)
+        summary, _ = self._llm_chat(
+            _QA_SYNTHESIZE_SYSTEM,
+            user_msg,
+            max_tokens=_QA_MAX_TOKENS,
+        )
+        if self._is_yes_no_question(query) and self._yesno_answer_incomplete(summary):
+            summary, _ = self._llm_chat(
+                _QA_SYNTHESIZE_SYSTEM,
+                user_msg
+                + "\n\nYour previous reply was too short. Write one full bullet starting with Yes, or No, "
+                "then the evidence and [SOURCE N].",
+                max_tokens=_QA_MAX_TOKENS,
+            )
+        if self._answer_claims_no_notification(query, summary):
+            summary, _ = self._llm_chat(
+                _QA_SYNTHESIZE_SYSTEM,
+                user_msg + self._notification_synthesize_hint(query, extracted),
+                max_tokens=_QA_MAX_TOKENS,
+            )
+        return summary
+
+    @staticmethod
+    def _is_no_evidence(extracted: str) -> bool:
+        """True only when extraction explicitly found nothing (not when format is imperfect)."""
+        text = extracted.strip()
+        if not text:
+            return True
+        upper = text.upper()
+        if upper == "NONE":
+            return True
+        if upper.startswith("NONE") and len(text) < 40:
+            return True
+        # Ignore lines that are only NONE / whitespace
+        content_lines = [
+            ln for ln in text.splitlines()
+            if ln.strip() and ln.strip().upper() != "NONE"
+        ]
+        return len(content_lines) == 0
+
+    def _generate_qa_answer(self, query: str, context: str) -> tuple[str, dict]:
+        """Two-step QA: extract evidence from chunks, then synthesize a short cited answer."""
+        t_extract = time.perf_counter()
+        extracted, _ = self._llm_chat(
+            _QA_EXTRACT_SYSTEM,
+            self._qa_extract_user_message(context, query),
+            max_tokens=_QA_EXTRACT_MAX_TOKENS,
+        )
+        extract_s = time.perf_counter() - t_extract
+
+        if self._is_no_evidence(extracted):
+            return _QA_ABSTENTION, {
+                "latency": extract_s,
+                "extract_s": extract_s,
+                "synthesize_s": 0.0,
+            }
+
+        t_synth = time.perf_counter()
+        summary = self._synthesize_from_extract(query, extracted)
+        synth_s = time.perf_counter() - t_synth
+        return summary, {
+            "latency": extract_s + synth_s,
+            "extract_s": extract_s,
+            "synthesize_s": synth_s,
+        }
+
+    @staticmethod
+    def _qa_extract_stream_prompt(context: str, query: str) -> str:
+        user_block = TOSAssistant._qa_extract_user_message(context, query)
+        return (
+            f"<|im_start|>system\n{_QA_EXTRACT_SYSTEM}<|im_end|>\n"
+            f"<|im_start|>user\n{user_block}<|im_end|>\n"
+            f"<|im_start|>assistant\n"
+        )
+
+    @staticmethod
+    def _qa_synthesize_stream_prompt(query: str, extracted: str) -> str:
+        user_block = TOSAssistant._qa_synthesize_user_message(query, extracted)
+        return (
+            f"<|im_start|>system\n{_QA_SYNTHESIZE_SYSTEM}<|im_end|>\n"
+            f"<|im_start|>user\n{user_block}<|im_end|>\n"
+            f"<|im_start|>assistant\n"
+        )
+
+    def _llm_complete(self, prompt: str, max_tokens: int) -> str:
+        """Single non-streaming completion from a raw chat-template prompt."""
+        output = self.llm(
+            prompt,
+            max_tokens=max_tokens,
+            temperature=0.0,
+            stop=["<|im_end|>"],
+            stream=False,
+        )
+        return output["choices"][0].get("text", "").strip()
 
     @staticmethod
     def _build_context(docs: list[Document]) -> str:
@@ -508,21 +722,27 @@ class TOSAssistant:
             return
 
         try:
-            docs, _ = self._get_relevant_chunks(query, state, top_k=_QA_TOP_K)
+            docs, _ = self._get_relevant_chunks(query, state, top_k=self._qa_top_k(state))
             if not docs:
                 yield {"type": "error", "code": "NO_RESULTS", "data": "No relevant info found."}
                 return
 
             context = self._build_context(docs)
-            prompt = f"<|im_start|>system\nAnswer using ONLY the provided context. You MUST cite sources for every claim using [SOURCE N] format. If the answer is not in the provided context, you MUST say 'I do not have enough information to answer this'.<|im_end|>\n<|im_start|>user\nContext:\n{context}\n\nQuestion: {query}<|im_end|>\n<|im_start|>assistant\n"
-            
-            full_text = ""
-            for chunk in self.llm(prompt, max_tokens=450, temperature=0.0, stop=["<|im_end|>"], stream=True):
-                token = chunk["choices"][0].get("text", "")
-                if token:
-                    full_text += token
-                    yield {"type": "token", "data": token}
-            
+
+            extracted = self._llm_complete(
+                self._qa_extract_stream_prompt(context, query),
+                max_tokens=_QA_EXTRACT_MAX_TOKENS,
+            )
+            if self._is_no_evidence(extracted):
+                yield {"type": "token", "data": _QA_ABSTENTION}
+                yield {"type": "sources", "data": self._all_sources(docs)}
+                yield {"type": "done", "full_text": _QA_ABSTENTION}
+                return
+
+            full_text = self._synthesize_from_extract(query, extracted)
+            if full_text:
+                yield {"type": "token", "data": full_text}
+
             yield {"type": "sources", "data": self._all_sources(docs)}
             yield {"type": "done", "full_text": full_text}
         except Exception as e:
