@@ -1,6 +1,16 @@
 import re
 
+from langchain_core.documents import Document
+
 _RE_SANITISE = re.compile(r'[^\w\s\.\,\-\(\)\/\&]')
+
+_LIGATURES = {
+    "ﬁ": "fi",
+    "ﬂ": "fl",
+    "ﬀ": "ff",
+    "ﬃ": "ffi",
+    "ﬄ": "ffl",
+}
 
 def sanitise_label(value: str, max_length: int = 100) -> str:
     """
@@ -12,15 +22,38 @@ def sanitise_label(value: str, max_length: int = 100) -> str:
     cleaned = _RE_SANITISE.sub('', value).strip()
     return cleaned[:max_length] if cleaned else "Unknown"
 
-def clean_text(text: str) -> str:
-    """Standard cleaning for legal text."""
+def clean_text(text: str, *, preserve_lines: bool = True) -> str:
+    """Standard cleaning for legal text. Preserves line breaks for heading detection."""
     if not text:
         return ""
-    # Normalize whitespace
+    for old, new in _LIGATURES.items():
+        text = text.replace(old, new)
+    # Drop control chars except newline (needed for convert_to_markdown)
+    text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]', '', text)
+    if preserve_lines:
+        lines = []
+        for line in text.splitlines():
+            normalized = re.sub(r'[^\S\n]+', ' ', line).strip()
+            if normalized:
+                lines.append(normalized)
+        return '\n'.join(lines)
     text = re.sub(r'\s+', ' ', text)
-    # Remove control characters
-    text = re.sub(r'[\x00-\x1f\x7f-\x9f]', '', text)
     return text.strip()
+
+
+def pages_to_source_text(documents: list[Document]) -> str:
+    """Join PDF pages with explicit page markers for document-level chunking."""
+    parts: list[str] = []
+    for doc in documents:
+        page = doc.metadata.get("page", 0)
+        try:
+            page_1idx = int(page) + 1
+        except (TypeError, ValueError):
+            page_1idx = 1
+        body = clean_text(doc.page_content)
+        if body:
+            parts.append(f"<!-- page:{page_1idx} -->\n{body}")
+    return '\n\n'.join(parts)
 
 # ── Markdown Conversion Regexes ──────────────────────────────────────────────
 _RE_PAGE       = re.compile(r'^---\s*PAGE\s+(\d+)\s*---$', re.IGNORECASE)

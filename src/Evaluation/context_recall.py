@@ -212,7 +212,7 @@ def run(model: str):
     pinecone_key = os.getenv("PINECONE_API_KEY", "")
     chroma_dir   = str(PROJECT_ROOT / "data" / "cr_chroma")
 
-    from src.RAG.engine import TOSAssistant
+    from src.RAG.engine import TOSAssistant, _QA_TOP_K
     rag = TOSAssistant(
         model_path=model_path,
         pinecone_api_key=pinecone_key,
@@ -261,7 +261,7 @@ def run(model: str):
 
             # Retrieve chunks — same path as production, but stop before LLM
             try:
-                docs, _ = rag._get_relevant_chunks(question, state, top_k=3)
+                docs, _ = rag._get_relevant_chunks(question, state, top_k=5)
             except Exception as e:
                 print(f"      ✗ Retrieval error: {e}")
                 continue

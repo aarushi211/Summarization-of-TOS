@@ -17,6 +17,7 @@ pinecone-client
 rank_bm25
 sentence-transformers
 pypdf
+pymupdf
 beautifulsoup4
 chromadb
 tenacity

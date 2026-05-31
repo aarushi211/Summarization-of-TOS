@@ -21,10 +21,18 @@ from src.RAG.schemas import (
     SessionState, RAGError, DocumentNotLoadedError, 
     RetrievalError, InferenceError, IngestionError, SUMMARY_TOPICS
 )
-from src.RAG.processors import clean_text, convert_to_markdown, sanitise_label
+from src.RAG.processors import clean_text, convert_to_markdown, pages_to_source_text, sanitise_label
 from src.RAG.loaders import load_pdf, load_text
+from src.RAG.query_expansion import expand_search_query
 
 logger = logging.getLogger(__name__)
+
+# Retrieval / search depth
+_DENSE_SEARCH_K = 50
+_BM25_SEARCH_K = 50
+_RRF_CANDIDATE_K = 50
+_QA_TOP_K = 5
+_SUMMARY_TOP_K = 3
 
 # ── Retry policies ────────────────────────────────────────────────────────────
 _RETRY_PINECONE = dict(
@@ -139,31 +147,43 @@ class TOSAssistant:
             raise EnvironmentError(f"Pinecone index {index_name} not ready.")
 
     def _build_chunks(self, documents: list[Document]) -> list[Document]:
+        """Chunk the full document (all pages) so section headers span page boundaries."""
         all_chunks: list[Document] = []
         chunk_id = 0
-        for doc in documents:
-            base_page = doc.metadata.get("page", 0)
-            md_text = convert_to_markdown(clean_text(doc.page_content))
-            sections = self.header_splitter.split_text(md_text)
-            for section in sections:
-                sub_chunks = self.sub_splitter.split_documents([section])
-                for chunk in sub_chunks:
-                    body = chunk.page_content
-                    page_m = re.search(r'<!--\s*page:(\d+)\s*-->', body)
-                    page_1idx = int(page_m.group(1)) if page_m else (base_page + 1)
-                    body = re.sub(r'<!--.*?-->', '', body).strip()
-                    if not body: continue
-                    
-                    section_title = chunk.metadata.get("section", "General")
-                    chunk.metadata.update({
-                        "chunk_id": chunk_id,
-                        "page": page_1idx - 1,
-                        "page_label": f"p.{page_1idx}",
-                        "citation": f"p.{page_1idx} › {section_title}",
-                    })
-                    chunk.page_content = body
-                    all_chunks.append(chunk)
-                    chunk_id += 1
+        default_page_1idx = 1
+        if documents:
+            first_page = documents[0].metadata.get("page", 0)
+            try:
+                default_page_1idx = int(first_page) + 1
+            except (TypeError, ValueError):
+                pass
+
+        source_text = pages_to_source_text(documents)
+        if not source_text.strip():
+            return all_chunks
+
+        md_text = convert_to_markdown(source_text)
+        sections = self.header_splitter.split_text(md_text)
+        for section in sections:
+            sub_chunks = self.sub_splitter.split_documents([section])
+            for chunk in sub_chunks:
+                body = chunk.page_content
+                page_m = re.search(r'<!--\s*page:(\d+)\s*-->', body)
+                page_1idx = int(page_m.group(1)) if page_m else default_page_1idx
+                body = re.sub(r'<!--.*?-->', '', body).strip()
+                if not body:
+                    continue
+
+                section_title = chunk.metadata.get("section", "General")
+                chunk.metadata.update({
+                    "chunk_id": chunk_id,
+                    "page": page_1idx - 1,
+                    "page_label": f"p.{page_1idx}",
+                    "citation": f"p.{page_1idx} › {section_title}",
+                })
+                chunk.page_content = body
+                all_chunks.append(chunk)
+                chunk_id += 1
         return all_chunks
 
     @retry(**_RETRY_PINECONE)
@@ -219,7 +239,7 @@ class TOSAssistant:
         docs = load_pdf(pdf_path)
         t_parse_end = time.perf_counter()
         
-        state.full_text = '\n'.join(clean_text(d.page_content) for d in docs)
+        state.full_text = pages_to_source_text(docs)
         
         metrics = {
             "stage": "ingest_document",
@@ -235,7 +255,7 @@ class TOSAssistant:
     def ingest_text_file(self, txt_path: str, state: SessionState):
         t_start = time.perf_counter()
         docs = load_text(txt_path)
-        state.full_text = '\n'.join(clean_text(d.page_content) for d in docs)
+        state.full_text = pages_to_source_text(docs)
         metrics = {"stage": "ingest_document", "pdf_parse_s": 0.1, "page_count": 1}
         self._index_chunks(docs, metrics, state)
         metrics["total_ingest_s"] = time.perf_counter() - t_start
@@ -244,7 +264,7 @@ class TOSAssistant:
     def answer_question(self, query: str, state: SessionState) -> dict:
         """Non-streaming version for benchmarking and internal use."""
         t_start = time.perf_counter()
-        docs, rm = self._get_relevant_chunks(query, state, top_k=3)
+        docs, rm = self._get_relevant_chunks(query, state, top_k=_QA_TOP_K)
         t_retrieval = time.perf_counter() - t_start
         
         if not docs:
@@ -301,7 +321,7 @@ class TOSAssistant:
         return [doc_map[cid] for cid in sorted(scores, key=scores.__getitem__, reverse=True)]
 
     @retry(**_RETRY_PINECONE)
-    def _search_vectorstore(self, query: str, namespace: str, k: int = 50) -> list:
+    def _search_vectorstore(self, query: str, namespace: str, k: int = _DENSE_SEARCH_K) -> list:
         """Search whichever vector store is active."""
         from langchain_core.documents import Document
     
@@ -330,24 +350,81 @@ class TOSAssistant:
             )
             return vec_store.similarity_search(query, k=k)
 
+    def _fetch_namespace_chunks(self, namespace: str) -> list[Document]:
+        """Load all chunks in a namespace for BM25 (API requests have no in-memory cache)."""
+        if self._use_local:
+            collection_name = f"{self._chroma_collection_name}_{namespace}"
+            try:
+                collection = self._chroma_client.get_collection(collection_name)
+            except Exception:
+                return []
+            if collection.count() == 0:
+                return []
+            results = collection.get(include=["documents", "metadatas"])
+            return [
+                Document(page_content=text, metadata=meta)
+                for text, meta in zip(results["documents"], results["metadatas"])
+            ]
+
+        try:
+            all_ids: list[str] = []
+            for page in self._pc_index.list(namespace=namespace, limit=100):
+                if isinstance(page, list):
+                    all_ids.extend(page)
+                elif isinstance(page, dict):
+                    all_ids.extend(page.get("vectors", []) or page.get("ids", []))
+            if not all_ids:
+                return []
+            docs: list[Document] = []
+            batch_size = 100
+            for i in range(0, len(all_ids), batch_size):
+                batch_ids = all_ids[i : i + batch_size]
+                fetched = self._pc_index.fetch(ids=batch_ids, namespace=namespace)
+                for vid, record in fetched.vectors.items():
+                    meta = dict(record.metadata or {})
+                    text = meta.pop("text", None) or meta.pop("page_content", "") or ""
+                    if text:
+                        docs.append(Document(page_content=text, metadata=meta))
+            return docs
+        except Exception as exc:
+            logger.warning("Could not load namespace chunks for BM25: %s", exc)
+            return []
+
+    def _bm25_corpus(self, state: SessionState, dense_results: list[Document]) -> list[Document]:
+        if state.cached_chunks:
+            return state.cached_chunks
+        stored = self._fetch_namespace_chunks(state.pinecone_namespace)
+        return stored or dense_results
+
     @traceable(name="Hybrid Retrieval")
-    def _get_relevant_chunks(self, query: str, state, top_k: int = 7) -> tuple:
+    def _get_relevant_chunks(self, query: str, state, top_k: int = _QA_TOP_K) -> tuple:
         rm: dict = {}
+        search_query = expand_search_query(query)
+        if search_query != query:
+            rm["expanded_query"] = search_query
+
         try:
             t0 = time.perf_counter()
-            pinecone_results = self._search_vectorstore(query, state.pinecone_namespace)  # renamed
+            dense_results = self._search_vectorstore(search_query, state.pinecone_namespace)
             rm["retrieval_s"] = time.perf_counter() - t0
         except Exception as exc:
             from src.RAG.schemas import RetrievalError
-            from tenacity import RetryError
             raise RetrievalError("Vector search unavailable.") from exc
-    
-        if not pinecone_results:
+
+        bm25_corpus = self._bm25_corpus(state, dense_results)
+        if not dense_results and not bm25_corpus:
             return [], rm
-    
-        bm25 = BM25Retriever.from_documents(pinecone_results, k=30)
-        bm25_results = bm25.invoke(query)
-        candidates = self._reciprocal_rank_fusion(pinecone_results, bm25_results)[:50]
+        bm25_k = min(_BM25_SEARCH_K, len(bm25_corpus))
+        bm25_results: list[Document] = []
+        if bm25_k > 0:
+            bm25 = BM25Retriever.from_documents(bm25_corpus, k=bm25_k)
+            bm25_results = bm25.invoke(search_query)
+
+        if not dense_results and not bm25_results:
+            return [], rm
+
+        candidate_lists = [lst for lst in (dense_results, bm25_results) if lst]
+        candidates = self._reciprocal_rank_fusion(*candidate_lists)[:_RRF_CANDIDATE_K]
     
         pairs = [[query, doc.page_content] for doc in candidates]
         scores = self.cross_encoder.predict(pairs)
@@ -411,7 +488,7 @@ class TOSAssistant:
 
         for label, query in SUMMARY_TOPICS:
             try:
-                docs, _ = self._get_relevant_chunks(query, state, top_k=3)
+                docs, _ = self._get_relevant_chunks(query, state, top_k=_SUMMARY_TOP_K)
                 fresh = [d for d in docs if d.metadata["chunk_id"] not in seen_ids] or docs
                 for d in fresh: seen_ids.add(d.metadata["chunk_id"])
                 
@@ -431,7 +508,7 @@ class TOSAssistant:
             return
 
         try:
-            docs, _ = self._get_relevant_chunks(query, state, top_k=3)
+            docs, _ = self._get_relevant_chunks(query, state, top_k=_QA_TOP_K)
             if not docs:
                 yield {"type": "error", "code": "NO_RESULTS", "data": "No relevant info found."}
                 return

@@ -160,7 +160,7 @@ def mock_assistant_instance():
          patch("src.RAG.engine.Llama"), \
          patch("src.RAG.engine.CrossEncoder") as mock_ce_cls, \
          patch.object(TOSAssistant, "_ensure_pinecone_index"), \
-         patch.object(TOSAssistant, "_pinecone_search", return_value=fake_docs):
+         patch.object(TOSAssistant, "_search_vectorstore", return_value=fake_docs):
 
         # Cross-encoder scores: doc[0] is most relevant, doc[2] least
         mock_ce = MagicMock()
@@ -184,8 +184,7 @@ def mock_assistant_instance():
         )
         assistant.sub_splitter = RecursiveCharacterTextSplitter(chunk_size=3500, chunk_overlap=700)
 
-        # Patch _pinecone_search on the instance so it returns our fake docs
-        assistant._pinecone_search = MagicMock(return_value=fake_docs)
+        assistant._search_vectorstore = MagicMock(return_value=fake_docs)
 
         yield assistant, fake_docs, mock_ce
 
@@ -202,12 +201,16 @@ def test_rag_retrieval_returns_grounded_results(mock_assistant_instance):
     from src.RAG.schemas import SessionState
 
     assistant, fake_docs, mock_ce = mock_assistant_instance
-    state = SessionState(pinecone_namespace="user_abc_doc_123", document_id="doc-123")
+    state = SessionState(
+        pinecone_namespace="user_abc_doc_123",
+        document_id="doc-123",
+        cached_chunks=fake_docs,
+    )
 
     docs, metrics = assistant._get_relevant_chunks(
         query="what data do you share with third parties?",
         state=state,
-        top_k=3,
+        top_k=5,
     )
 
     # Cross-encoder must be called — skipping it means we return random chunks
@@ -244,7 +247,7 @@ def test_rag_pipeline_handles_empty_index(mock_assistant_instance):
     assistant, _, _ = mock_assistant_instance
 
     # Override to simulate an empty index
-    assistant._pinecone_search = MagicMock(return_value=[])
+    assistant._search_vectorstore = MagicMock(return_value=[])
 
     state = SessionState(pinecone_namespace="user_new_doc_000", document_id="doc-000")
 
