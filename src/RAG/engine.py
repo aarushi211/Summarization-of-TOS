@@ -40,10 +40,22 @@ _SECTION_CHUNK_OVERLAP = 300
 
 _RE_WITHOUT_NOTIF_Q = re.compile(r"without\s+(?:prior\s+)?notif", re.I)
 _RE_NOTIFY_IN_TEXT = re.compile(r"\bnotif\w*", re.I)
+_RE_LEGAL_DANGEROUS_Q = re.compile(
+    r"\b("
+    r"sue|lawsuit|litigate|take\s+\w+\s+to\s+court|"
+    r"legal\s+advice|legal\s+strategy|how\s+to\s+win|"
+    r"should\s+i\s+sue|can\s+i\s+sue|file\s+a\s+claim"
+    r")\b",
+    re.I,
+)
 _QA_MAX_TOKENS = 150
 _QA_EXTRACT_MAX_TOKENS = 200
 
 _QA_ABSTENTION = "I do not have enough information to answer this."
+_QA_LEGAL_SAFETY_REFUSAL = (
+    "I cannot provide legal advice or strategy. I can summarize what the document says, "
+    "but for legal guidance you should consult a qualified attorney."
+)
 
 _QA_EXTRACT_SYSTEM = """You extract evidence from legal document source chunks.
 
@@ -58,6 +70,7 @@ _RE_YES_NO = re.compile(
     r"^\s*(can|could|does|do|did|is|are|was|were|will|would|shall|should|am|have|has)\b",
     re.I,
 )
+_RE_WHAT_ALLOWED_Q = re.compile(r"^\s*what\s+.*\ballowed\b", re.I)
 
 _QA_SYNTHESIZE_SYSTEM = f"""You write a brief legal answer using ONLY the extracted evidence below.
 
@@ -68,6 +81,7 @@ Rules:
 - Do NOT use numbered lists, steps, introductions, or extra sentences.
 - Do not add facts not present in the extracted evidence.
 - Do not use hedging (may, might, usually, often, typically) unless the evidence uses them.
+- Start the first bullet by directly answering the question in plain terms (for example: "You may ...", "No, ...", "Yes, ...").
 - If evidence is insufficient, reply with exactly:
   {_QA_ABSTENTION}
 """
@@ -312,6 +326,13 @@ class TOSAssistant:
 
     def answer_question(self, query: str, state: SessionState) -> dict:
         """Non-streaming version for benchmarking and internal use."""
+        if self._is_legal_dangerous_query(query):
+            return {
+                "answer": _QA_LEGAL_SAFETY_REFUSAL,
+                "sources": [],
+                "context": "",
+            }
+
         t_start = time.perf_counter()
         docs, rm = self._get_relevant_chunks(query, state, top_k=self._qa_top_k(state))
         t_retrieval = time.perf_counter() - t_start
@@ -506,6 +527,10 @@ class TOSAssistant:
         return q.endswith("?") and bool(_RE_YES_NO.match(q))
 
     @staticmethod
+    def _is_legal_dangerous_query(query: str) -> bool:
+        return bool(_RE_LEGAL_DANGEROUS_Q.search(query))
+
+    @staticmethod
     def _qa_top_k(state: SessionState) -> int:
         if state.page_count >= _LONG_DOC_MIN_PAGES:
             return _QA_TOP_K_LONG
@@ -554,6 +579,11 @@ class TOSAssistant:
             msg += _QA_SYNTHESIZE_YESNO_HINT
         else:
             msg += "\n\nUse only the evidence lines above. One bullet per line, max 2 bullets."
+        if _RE_WHAT_ALLOWED_Q.search(query):
+            msg += (
+                "\n\nFor this question, begin with a direct allowance statement such as "
+                '"You may ... only if ..." and then cite [SOURCE N].'
+            )
         msg += TOSAssistant._notification_synthesize_hint(query, extracted)
         return msg
 
@@ -564,6 +594,18 @@ class TOSAssistant:
         if len(a) < 35:
             return True
         return bool(re.match(r"^(answer:\s*)?(yes|no)[\.\!\?]*\s*$", a, re.I))
+
+    @staticmethod
+    def _has_extract_evidence(extracted: str) -> bool:
+        for ln in extracted.splitlines():
+            line = ln.strip()
+            if not line:
+                continue
+            if line.upper() == "NONE":
+                continue
+            if len(line) >= 20:
+                return True
+        return False
 
     def _synthesize_from_extract(self, query: str, extracted: str) -> str:
         user_msg = self._qa_synthesize_user_message(query, extracted)
@@ -584,6 +626,14 @@ class TOSAssistant:
             summary, _ = self._llm_chat(
                 _QA_SYNTHESIZE_SYSTEM,
                 user_msg + self._notification_synthesize_hint(query, extracted),
+                max_tokens=_QA_MAX_TOKENS,
+            )
+        if summary.strip() == _QA_ABSTENTION and self._has_extract_evidence(extracted):
+            summary, _ = self._llm_chat(
+                _QA_SYNTHESIZE_SYSTEM,
+                user_msg
+                + "\n\nYou have usable evidence above. Do NOT abstain. Write one concise sentence "
+                "that directly answers the question and cite [SOURCE N].",
                 max_tokens=_QA_MAX_TOKENS,
             )
         return summary
@@ -719,6 +769,12 @@ class TOSAssistant:
     def answer_question_stream(self, query: str, state: SessionState) -> Generator[dict, None, None]:
         if not state.has_document:
             yield {"type": "error", "code": "DOCUMENT_NOT_LOADED", "data": "No document loaded."}
+            return
+
+        if self._is_legal_dangerous_query(query):
+            yield {"type": "token", "data": _QA_LEGAL_SAFETY_REFUSAL}
+            yield {"type": "sources", "data": []}
+            yield {"type": "done", "full_text": _QA_LEGAL_SAFETY_REFUSAL}
             return
 
         try:
