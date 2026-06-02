@@ -15,7 +15,7 @@ export default function AuthPage() {
   const [success, setSuccess] = useState("");
 
   // API URL comes from env — never hardcoded
-  const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+  const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8080";
 
   // Redirect if already authenticated
   useEffect(() => {

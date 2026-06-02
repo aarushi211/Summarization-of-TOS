@@ -46,7 +46,7 @@ interface Message {
 }
 
 // ── API base URL — trailing slash stripped to prevent double-slash URLs ───────
-const API_BASE = (process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000").replace(/\/$/, "");
+const API_BASE = (process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8080").replace(/\/$/, "");
 
 // ── Authenticated fetch helper ────────────────────────────────────────────────
 async function authFetch(
