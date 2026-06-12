@@ -31,21 +31,39 @@ Built to production engineering standards, with a focus on the problems that mat
 - **Frontend:** https://tos-summarization.vercel.app
 - **Backend:** https://tos-api-110277869308.us-east1.run.app
 
-### Performance (Portfolio Deployment)
+### Performance
 
-Running on Cloud Run with `min-instances=0` to minimize cost. Expect a cold
-start on first request after inactivity.
+#### Local benchmark (CPU, `RUNTIME_MODE=desktop`)
 
-| Operation              | Latency   |
-|------------------------|-----------|
-| Cold start             | ~4m 45s   |
-| Document indexing      | ~1m 06s   |
-| Q&A (per question)     | ~1m 15s   |
-| Summary (per topic)    | ~1m 30s   |
+Measured with `python src/Evaluation/benchmark_latency.py` on 5 PDFs and 15
+questions from `data/Test_data.csv` (FAISS + GGUF on CPU). Aggregates in
+`latency_summary.csv` (2026-06-04 run).
+
+| Stage | Latency |
+|-------|---------|
+| Model load (one-time) | 18.0s (GGUF 2.5s, embeddings 0.2s, cross-encoder 0.1s) |
+| Document ingestion (avg) | 1.9s (PDF parse ~0.2s, FAISS index ~1.7s) |
+| Global summary (avg) | 1m 07s (~9.6 tok/s) |
+| Q&A per question (avg / median / P95) | 17.2s / 17.5s / 25.6s |
+| Q&A breakdown (avg) | retrieval 1.3s, LLM 15.8s (~5.4 tok/s) |
+| Full benchmark (5 docs + 15 Q&A) | 10m 21s |
+
+#### Cloud Run (portfolio deployment)
+
+Running with `min-instances=0` to minimize cost. Expect a cold start on first
+request after inactivity; per-request latency is higher than local desktop due
+to serverless CPU, GCS model mount, and cold caches.
+
+| Operation | Latency |
+|-----------|---------|
+| Cold start | ~4m 45s |
+| Document indexing | ~1m 06s |
+| Q&A (per question) | ~1m 15s |
+| Summary (per topic) | ~1m 30s |
 
 Cold starts are intentional. Setting `min-instances=1` and baking models into
 the image would reduce cold start to ~30s but increases monthly cost.
-Tradeoff documented in [DEPLOYMENT.md](./DEPLOYMENT.md).
+Tradeoffs documented in [DEPLOYMENT.md](./DEPLOYMENT.md).
 
 ---
 
@@ -53,12 +71,19 @@ Tradeoff documented in [DEPLOYMENT.md](./DEPLOYMENT.md).
 
 ### Core Inference Pipeline (`src/RAG/engine.py`)
 
-- **Structure-aware chunking:** PDF → markdown → legal header splitting →
-  recursive chunking with citation metadata (`page`, `section`, `citation`)
-- **Hybrid retrieval:** dense vector search (Pinecone) fused with BM25 via
-  Reciprocal Rank Fusion (RRF)
+- **PDF ingestion:** PyMuPDF primary loader with PyPDF fallback; text is
+  cleaned with line breaks preserved and assembled with `<!-- page:N -->`
+  markers before chunking
+- **Structure-aware chunking:** in-memory markdown (not written to disk) →
+  legal header splitting → recursive chunks (1200 / 300 overlap) with
+  citation metadata (`page`, `section`, `citation`)
+- **Hybrid retrieval:** dense vector search (Pinecone) fused with BM25 over
+  the full chunk namespace via Reciprocal Rank Fusion (RRF), plus legal
+  query expansion (`src/RAG/query_expansion.py`)
 - **Cross-encoder reranking:** `ms-marco-MiniLM-L-6-v2` reranks top-50
-  candidates to top-7
+  candidates to top-5 for Q&A (top-7 for longer documents)
+- **Grounded Q&A:** extract-then-answer over retrieved chunks; abstention and
+  notification guards; refusal path for legally dangerous prompts
 - **Streaming responses:** token-level SSE streaming to client
 - **Evidence attribution:** every response returns source objects with
   `citation`, `section`, `page`, and `excerpt`
@@ -135,7 +160,7 @@ without any cloud dependencies.
 ```text
 api/                 FastAPI app, routers, config, security, middleware
 src/RAG/             Retrieval and generation pipeline
-src/Evaluation/      Adversarial red team, context recall, faithfulness, answer relevance, RAGAS pipeline
+src/Evaluation/      Quality metrics, red team, latency benchmark, RAGAS pipeline
 frontend/            Next.js frontend
 tests/               API and RAG pipeline tests
 cloudbuild.yaml      CI/CD: build → push → deploy → smoke test → migrate
@@ -183,6 +208,45 @@ ALLOWED_ORIGINS
 ```
 ---
 
+## RAG Evaluation
+
+Offline eval scripts in `src/Evaluation/` measure retrieval and generation
+quality on `data/Test_data.csv` (15 questions across Netflix, Spotify,
+YouTube, and OpenAI PDFs). Run from the repo root with models available
+locally (see `DEPLOYMENT.md`). **Re-ingest documents** after chunking or
+embedding changes so scores reflect the current index.
+
+Set `GROQ_API_KEY` in `.env` for LLM-as-judge metrics (recommended). Without
+it, faithfulness falls back to a local NLI model with more conservative scores.
+
+| Metric | Score | Source CSV |
+|--------|-------|------------|
+| **Context recall** | **0.93** (14/15; 2 partial) | `context_recall_results.csv` |
+| **Faithfulness** | **0.88** (QA mode, 15 questions) | `faithfulness_summary.csv` |
+| **Answer relevance** | **0.60** (4/15 abstentions) | `answer_relevance_results.csv` |
+| **Red team safety** | **100%** (9/9 safe) | `red_team_results.csv` |
+
+Scores above are the latest run aggregates from those files at the repo root.
+Judges use Groq (`llama-3.3-70b-versatile`) when `GROQ_API_KEY` is set.
+
+Interpretation: retrieval is strong (only Spotify upload rules and OpenAI
+automated-decision-making scored partial). The main gap is **Q&A abstention**
+(four “I do not have enough information” answers despite high context recall on
+some of those rows). Faithfulness stays high on abstentions because they add no
+contradicted claims.
+
+```bash
+python src/Evaluation/context_recall.py
+python src/Evaluation/faithfulness.py          # --mode qa | summary | both
+python src/Evaluation/answer_relevance.py
+python src/Evaluation/red_team.py
+python src/Evaluation/benchmark_latency.py     # latency_summary.csv
+```
+
+Each script writes a CSV in the project root and prints a console summary.
+
+---
+
 ## Tests
 
 ```bash
@@ -214,5 +278,6 @@ failure modes, and cost/UX tradeoffs.
 | SSRF + upload security | `api/utils/validation.py` |
 | Auth + rate limiting | `api/core/security.py` |
 | RAG pipeline (RRF + reranking) | `src/RAG/engine.py` |
+| RAG quality metrics | `src/Evaluation/`, `data/Test_data.csv` |
 | CI/CD rollout flow | `cloudbuild.yaml` |
 | Deployment decisions | `DEPLOYMENT.md` |

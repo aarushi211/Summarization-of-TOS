@@ -46,7 +46,7 @@ As configured in `cloudbuild.yaml`:
 | `cpu` | 4 | LLM inference is CPU-bound; more cores reduce token latency |
 | `memory` | 8Gi | Model + embeddings + cross-encoder fit comfortably |
 | `concurrency` | 1 | Single LLM process; concurrent requests would thrash |
-| `timeout` | 300s | Long inference chains can take 60-90s per request |
+| `timeout` | 300s | Q&A + retrieval often 60–90s+ on Cloud Run CPU; local benchmark ~17s avg per question |
 | `min-instances` | 0 | Cost optimization for portfolio deployment |
 | `max-instances` | 1 | Prevents runaway cost; single model process anyway |
 | `--cpu-boost` | enabled | Allocates extra CPU during cold start initialization |
@@ -170,6 +170,11 @@ under project `tos-summarizer-prod`.
 (visible in response). Use this to correlate frontend errors with
 backend logs.
 
+**Latency regression:** Run `src/Evaluation/benchmark_latency.py` locally
+before releases. Outputs `latency_benchmark_report.csv` (per stage) and
+`latency_summary.csv` (aggregates). Compare against README / DEPLOYMENT
+tables rather than assuming desktop numbers apply on Cloud Run.
+
 ---
 
 ## 7. Cost vs UX Tradeoffs
@@ -182,6 +187,29 @@ backend logs.
 
 Current config accepts cold starts to keep costs near zero for a
 portfolio deployment with infrequent traffic.
+
+### Local vs Cloud Run latency
+
+Do not extrapolate local timings to production. The repo includes an offline
+benchmark that exercises the same RAG path on desktop:
+
+```bash
+python src/Evaluation/benchmark_latency.py
+```
+
+Latest local aggregates (`latency_summary.csv`, CPU + FAISS, 5 docs / 15 questions):
+
+| Metric | Local (desktop) | Cloud Run (portfolio) |
+|--------|-----------------|------------------------|
+| Model load (cold) | ~18s | ~4m 45s (GCS mount + init) |
+| Ingestion (avg) | ~1.9s | ~1m 06s |
+| Global summary (avg) | ~1m 07s | ~1m 30s per topic |
+| Q&A (avg per question) | ~17s (P95 ~26s) | ~1m 15s |
+
+Cloud Run is slower mainly because of cold starts, GCSFuse model load, fewer
+effective CPU cores under load, and Pinecone/network retrieval in server mode.
+Use local benchmarks for regression testing; use Cloud Run metrics for UX
+expectations on the live deployment.
 
 ---
 
